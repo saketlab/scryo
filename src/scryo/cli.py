@@ -34,7 +34,18 @@ def setup_logging() -> None:
     "--force-extract",
     is_flag=True,
     default=False,
-    help="Force re-extraction of RDS file even if parquet cache exists.",
+    help="Force re-extraction of source file even if parquet cache exists.",
+)
+@click.option(
+    "--analysis",
+    "analysis_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help=(
+        "For 10x .h5 input: path to the Cell Ranger analysis directory or "
+        "*_analysis.tar.gz tarball that holds reductions/clusters. If omitted, "
+        "scryo looks for one next to the h5."
+    ),
 )
 @click.version_option(version=__version__, package_name="scryo")
 def main(
@@ -43,52 +54,57 @@ def main(
     port: int,
     duckdb_mode: str,
     force_extract: bool,
+    analysis_path: Path | None,
 ) -> None:
     """scryo — Single-cell RNA-seq visualization.
 
-    Launch a visualization server for a Seurat RDS or parquet file.
+    Launch a visualization server for a Seurat RDS, AnnData h5ad, 10x Cell
+    Ranger h5, or parquet file.
 
     \b
     Examples:
         scryo /path/to/data.rds
+        scryo /path/to/data.h5ad
+        scryo /path/to/data.h5 --analysis /path/to/analysis.tar.gz
         scryo /path/to/data.rds --duckdb wasm
         scryo /path/to/data.parquet
     """
     setup_logging()
 
     input_path = input_path.resolve()
+    if analysis_path is not None:
+        analysis_path = analysis_path.resolve()
     suffix = input_path.suffix.lower()
 
-    if suffix == ".rds":
+    if suffix in (".rds", ".h5ad", ".h5"):
         parquet_path = input_path.with_suffix(".scryo.parquet")
+        if (
+            parquet_path.exists()
+            and not force_extract
+            and parquet_path.stat().st_mtime >= input_path.stat().st_mtime
+        ):
+            logger.info("Using cached parquet: %s", parquet_path)
+        elif suffix == ".rds":
+            from scryo.extract.seurat import extract_seurat
 
-        if parquet_path.exists() and not force_extract:
-            if parquet_path.stat().st_mtime >= input_path.stat().st_mtime:
-                logger.info("Using cached parquet: %s", parquet_path)
-            else:
-                logger.info("RDS is newer than cache, re-extracting...")
-                _run_extraction(input_path, parquet_path)
+            extract_seurat(input_path, parquet_path)
+        elif suffix == ".h5ad":
+            from scryo.extract.h5ad import extract_h5ad
+
+            extract_h5ad(input_path, parquet_path)
         else:
-            _run_extraction(input_path, parquet_path)
+            from scryo.extract.tenx import extract_h5
 
+            extract_h5(input_path, parquet_path, analysis_path=analysis_path)
     elif suffix in (".parquet", ".pq"):
         parquet_path = input_path
-
     else:
         raise click.BadParameter(
-            f"Unsupported file format: {suffix}. Use .rds or .parquet",
+            f"Unsupported file format: {suffix}. Use .rds, .h5ad, .h5, or .parquet",
             param_hint="INPUT_PATH",
         )
 
     _launch_server(parquet_path, host=host, port=port, duckdb_mode=duckdb_mode)
-
-
-def _run_extraction(rds_path: Path, parquet_path: Path) -> None:
-    """Run R extraction from RDS to parquet."""
-    from scryo.extract.seurat import extract_seurat
-
-    logger.info("Extracting: %s", rds_path)
-    extract_seurat(rds_path, parquet_path)
 
 
 def _launch_server(

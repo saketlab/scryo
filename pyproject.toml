@@ -23,6 +23,14 @@ dependencies = [
     "duckdb>=1.4.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "h5py>=3.10",
+]
+
+[project.optional-dependencies]
+h5ad = [
+    "anndata>=0.10",
 ]
 
 [project.scripts]
