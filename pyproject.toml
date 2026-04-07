@@ -1,0 +1,55 @@
+[project]
+name = "scryo"
+version = "0.1.0"
+description = "Easy interactive visualisation of single-cell data"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Saket Choudhary" },
+]
+keywords = ["single-cell", "RNA-seq", "visualization", "scRNA-seq", "Seurat"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "click>=8.0.0",
+    "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
+    "duckdb>=1.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
+
+[project.scripts]
+scryo = "scryo.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/saketlab/scryo"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scryo"]
+artifacts = ["src/scryo/static"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
