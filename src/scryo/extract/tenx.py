@@ -66,9 +66,11 @@ def extract_h5(
         logger.info("  Disambiguating %d duplicate gene names", n_genes - len(unique_genes))
         gene_names = _make_unique(gene_names)
 
-    # On-disk layout is genes x cells (CSC). Transpose then re-CSC for
-    # efficient column slicing in the cells x genes orientation.
-    X = X_genes_cells.T.tocsc()
+    # On-disk layout is genes x cells (CSC). Transpose then convert to CSR
+    # in the cells x genes orientation: write_chunked_parquet streams by row
+    # batches, and the sort_idx scatter below is O(len(sort_idx)) on CSR
+    # vs O(nnz) on CSC.
+    X = X_genes_cells.T.tocsr()
 
     if analysis_path is None:
         analysis_path = _find_analysis_sidecar(h5_path)

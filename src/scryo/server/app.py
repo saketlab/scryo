@@ -115,6 +115,23 @@ def _get_parquet_columns(parquet_path: Path) -> list[str]:
     return pf.schema_arrow.names
 
 
+# Seurat writes per-assay cell QC as ``nCount_<assay>`` / ``nFeature_<assay>``.
+# These share the scryo ``<gene>_<assay>`` suffix but are metadata, not genes.
+_GENE_SUFFIXES = ("_RNA", "_SCT")
+_NON_GENE_WITH_ASSAY_SUFFIX = frozenset(
+    f"{prefix}_{assay}"
+    for prefix in ("nCount", "nFeature")
+    for assay in ("RNA", "SCT")
+)
+
+
+def _is_gene_column(col: str) -> bool:
+    return (
+        any(col.endswith(s) for s in _GENE_SUFFIXES)
+        and col not in _NON_GENE_WITH_ASSAY_SUFFIX
+    )
+
+
 def create_scryo_server(
     parquet_path: Path,
     *,
@@ -148,9 +165,8 @@ def create_scryo_server(
     logger.info("Default reduction: %s (%s, %s)", default_reduc, x_col, y_col)
     logger.info("Available reductions: %s", list(reductions.keys()))
 
-    gene_suffixes = ("_RNA", "_SCT")
-    meta_columns = [c for c in all_columns if not any(c.endswith(s) for s in gene_suffixes)]
-    gene_columns = [c for c in all_columns if any(c.endswith(s) for s in gene_suffixes)]
+    meta_columns = [c for c in all_columns if not _is_gene_column(c)]
+    gene_columns = [c for c in all_columns if _is_gene_column(c)]
     logger.info(
         "  %d metadata/reduc columns, %d gene columns",
         len(meta_columns),
@@ -277,10 +293,7 @@ def _make_scryo_server(
         return await loop.run_in_executor(executor, lambda: handle_query(data))
 
     all_parquet_columns = _get_parquet_columns(parquet_path)
-    gene_suffixes = ("_RNA", "_SCT")
-    gene_columns_all = [
-        c for c in all_parquet_columns if any(c.endswith(s) for s in gene_suffixes)
-    ]
+    gene_columns_all = [c for c in all_parquet_columns if _is_gene_column(c)]
     gene_names_unique = sorted({c.rsplit("_", 1)[0] for c in gene_columns_all})
     available_assays = sorted({c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c})
     loaded_columns: set[str] = set()

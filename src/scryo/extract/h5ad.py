@@ -21,6 +21,20 @@ _CELLTYPE_CANDIDATES = (
     "seurat_clusters",
 )
 
+# ``adata.var`` column names that commonly hold human-readable gene symbols
+# when ``var_names`` are Ensembl (or other stable) IDs. Checked in order, and
+# the first match wins. ``feature_name`` is the CellxGene schema default.
+_GENE_SYMBOL_CANDIDATES = (
+    "feature_name",
+    "gene_symbols",
+    "gene_symbol",
+    "gene_name",
+    "gene_names",
+    "symbol",
+    "Symbol",
+    "hgnc_symbol",
+)
+
 
 def check_anndata_available() -> bool:
     """Check if the anndata package is importable."""
@@ -42,8 +56,7 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
         )
 
     import anndata
-    from anndata.utils import make_index_unique
-    from scipy.sparse import csc_matrix, issparse
+    from scipy.sparse import csr_matrix, issparse
 
     logger.info("Loading AnnData: %s", h5ad_path)
     adata = anndata.read_h5ad(h5ad_path)
@@ -82,7 +95,7 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
     if sort_idx is not None:
         meta = meta.iloc[sort_idx].reset_index(drop=True)
 
-    gene_names = list(make_index_unique(pd.Index(adata.var_names)))
+    gene_names = _resolve_gene_names(adata)
 
     logger.info("Extracting expression matrix as RNA assay...")
     X = adata.X
@@ -92,11 +105,10 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
             "Try `adata.X = adata.layers['counts']` (or another layer) before saving."
         )
 
-    # Use CSC for sparse: column slicing is O(1) on indptr, vs CSR which walks
-    # every row per chunk. Apply the row permutation once up-front so per-chunk
-    # densification doesn't repeat the scatter.
+    # CSR for sparse: write_chunked_parquet streams by row batches, and CSR
+    # fancy row indexing for sort_idx is O(len(sort_idx)) vs O(nnz) on CSC.
     if issparse(X):
-        X_out: csc_matrix | np.ndarray = csc_matrix(X)
+        X_out: csr_matrix | np.ndarray = csr_matrix(X)
         if sort_idx is not None:
             X_out = X_out[sort_idx, :]
     else:
@@ -105,6 +117,33 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
             X_out = np.ascontiguousarray(X_out[sort_idx, :])
 
     return write_chunked_parquet(meta, X_out, gene_names, output_path)
+
+
+def _resolve_gene_names(adata) -> list[str]:
+    """Pick gene display names, preferring symbols from ``adata.var`` when present.
+
+    CellxGene h5ad files use Ensembl IDs for ``var_names`` and store human-
+    readable symbols in ``var['feature_name']``; Scanpy/10x sometimes use
+    ``gene_symbols``. Rows with empty/NaN symbols fall back to the underlying
+    ``var_names`` entry so no column becomes anonymous (cellxgene itself
+    follows this convention for unnamed loci).
+    """
+    from anndata.utils import make_index_unique
+
+    var = adata.var
+    var_names_arr = np.asarray(adata.var_names, dtype=str)
+
+    for candidate in _GENE_SYMBOL_CANDIDATES:
+        if candidate not in var.columns:
+            continue
+        col = var[candidate]
+        str_values = col.astype(str).to_numpy()
+        missing = col.isna().to_numpy() | (str_values == "")
+        values = np.where(missing, var_names_arr, str_values)
+        logger.info("  Using var['%s'] for gene display names", candidate)
+        return list(make_index_unique(pd.Index(values)))
+
+    return list(make_index_unique(pd.Index(var_names_arr)))
 
 
 def _build_sort_index(meta: pd.DataFrame) -> np.ndarray | None:
