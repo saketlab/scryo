@@ -63,7 +63,9 @@ def extract_h5(
 
     unique_genes = set(gene_names)
     if len(unique_genes) < n_genes:
-        logger.info("  Disambiguating %d duplicate gene names", n_genes - len(unique_genes))
+        logger.info(
+            "  Disambiguating %d duplicate gene names", n_genes - len(unique_genes)
+        )
         gene_names = _make_unique(gene_names)
 
     # On-disk layout is genes x cells (CSC). Transpose then convert to CSR
@@ -159,7 +161,8 @@ def _find_analysis_sidecar(h5_path: Path) -> Path | None:
         if c.exists():
             logger.warning(
                 "Falling back to analysis tarball %s (no name match for %s)",
-                c, h5_path.name,
+                c,
+                h5_path.name,
             )
             return c
     return None
@@ -190,9 +193,7 @@ def _read_relevant_columns(buf: bytes, kind: str) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(buf), usecols=lambda c: c in keep)
 
 
-def _load_cellranger_analysis(
-    analysis_path: Path, barcodes: list[str]
-) -> pd.DataFrame:
+def _load_cellranger_analysis(analysis_path: Path, barcodes: list[str]) -> pd.DataFrame:
     """Build a metadata DataFrame from a Cell Ranger ``analysis/`` directory or tarball.
 
     Pulls every projection (t-SNE / UMAP / PCA — first two components) found
@@ -236,14 +237,19 @@ def _parse_tarball(tar_path: Path) -> dict[str, pd.DataFrame]:
 
 def _parse_directory(analysis_dir: Path) -> dict[str, pd.DataFrame]:
     parsed: dict[str, pd.DataFrame] = {}
-    for csv_path in [*analysis_dir.rglob("projection.csv"), *analysis_dir.rglob("clusters.csv")]:
+    for csv_path in [
+        *analysis_dir.rglob("projection.csv"),
+        *analysis_dir.rglob("clusters.csv"),
+    ]:
         rel = csv_path.relative_to(analysis_dir.parent).as_posix()
         if not _is_relevant_analysis_csv(f"/{rel}"):
             continue
         kind = _classify(rel)
         if kind is None:
             continue
-        parsed[rel] = _read_relevant_columns(csv_path.read_bytes(), kind.split(":", 1)[0])
+        parsed[rel] = _read_relevant_columns(
+            csv_path.read_bytes(), kind.split(":", 1)[0]
+        )
     return parsed
 
 
@@ -279,7 +285,9 @@ def _assemble_metadata(
                 continue
             label = kind.split(":", 1)[1]
             col = sub.iloc[:, 0]
-            base[label] = pd.Categorical(col.reindex(base.index).astype("string").fillna(""))
+            base[label] = pd.Categorical(
+                col.reindex(base.index).astype("string").fillna("")
+            )
             n_missing = (base[label] == "").sum()
             if n_missing:
                 logger.warning("  %d cells have no %s assignment", n_missing, label)

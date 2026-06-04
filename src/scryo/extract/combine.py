@@ -49,6 +49,7 @@ def write_chunked_parquet(
         def _read(start: int, end: int) -> np.ndarray:
             block: csr_matrix = X_csr[start:end]  # type: ignore[assignment]
             return block.toarray().astype(np.float32, copy=False)
+
     else:
         X_dense = np.asarray(X)
 
@@ -98,7 +99,11 @@ def write_streamed_parquet(
     n_batches = (n_cells + cell_batch - 1) // cell_batch
     logger.info(
         "Writing %s: %d cells x %d cols, %d row groups (batch=%d)",
-        output_path, n_cells, len(schema), n_batches, cell_batch,
+        output_path,
+        n_cells,
+        len(schema),
+        n_batches,
+        cell_batch,
     )
 
     with pq.ParquetWriter(
@@ -123,7 +128,9 @@ def write_streamed_parquet(
 
             row_group = pa.Table.from_arrays(arrays, schema=schema)
             writer.write_table(row_group)
-            logger.info("  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end)
+            logger.info(
+                "  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end
+            )
 
     size_gb = output_path.stat().st_size / 1e9
     logger.info("Done: %s (%.2f GB)", output_path, size_gb)
@@ -172,7 +179,11 @@ def combine_chunks(
     n_batches = (n_cells + cell_batch - 1) // cell_batch
     logger.info(
         "Writing %s: %d cells x %d cols, %d row groups (batch=%d)",
-        output_path, n_cells, len(schema), n_batches, cell_batch,
+        output_path,
+        n_cells,
+        len(schema),
+        n_batches,
+        cell_batch,
     )
 
     with pq.ParquetWriter(
@@ -188,7 +199,9 @@ def combine_chunks(
                 arrays.extend(ct.slice(start, end - start).columns)
             row_group = pa.Table.from_arrays(arrays, schema=schema)
             writer.write_table(row_group)
-            logger.info("  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end)
+            logger.info(
+                "  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end
+            )
 
     size_gb = output_path.stat().st_size / 1e9
     logger.info("Done: %s (%.2f GB)", output_path, size_gb)

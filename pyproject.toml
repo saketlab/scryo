@@ -26,6 +26,7 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "h5py>=3.10",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
