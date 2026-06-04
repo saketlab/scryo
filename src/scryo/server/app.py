@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable
 from functools import lru_cache
 from io import BytesIO
@@ -13,10 +14,13 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+from scryo.server.genestore import GeneStore, has_gene_store
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +67,9 @@ def _mount_bytes(
         content = get_content()
         rng = _parse_range(request, len(content))
         length = (rng[1] - rng[0]) if rng else len(content)
-        return Response(headers={"Content-Length": str(length), "Content-Type": media_type})
+        return Response(
+            headers={"Content-Length": str(length), "Content-Type": media_type}
+        )
 
     @app.get(url)
     async def get(request: Request) -> Response:
@@ -107,21 +113,11 @@ def detect_default_reduction(reductions: dict[str, tuple[str, str]]) -> str | No
     return next(iter(reductions), None)
 
 
-def _get_parquet_columns(parquet_path: Path) -> list[str]:
-    """Get column names from parquet without loading data."""
-    import pyarrow.parquet as pq
-
-    pf = pq.ParquetFile(parquet_path)
-    return pf.schema_arrow.names
-
-
 # Seurat writes per-assay cell QC as ``nCount_<assay>`` / ``nFeature_<assay>``.
 # These share the scryo ``<gene>_<assay>`` suffix but are metadata, not genes.
 _GENE_SUFFIXES = ("_RNA", "_SCT")
 _NON_GENE_WITH_ASSAY_SUFFIX = frozenset(
-    f"{prefix}_{assay}"
-    for prefix in ("nCount", "nFeature")
-    for assay in ("RNA", "SCT")
+    f"{prefix}_{assay}" for prefix in ("nCount", "nFeature") for assay in ("RNA", "SCT")
 )
 
 
@@ -138,6 +134,7 @@ def create_scryo_server(
     duckdb_mode: str = "server",
     host: str = "0.0.0.0",
     port: int = 8050,
+    default_color: str | None = None,
 ) -> tuple:
     """Create the scryo FastAPI application.
 
@@ -146,13 +143,24 @@ def create_scryo_server(
         duckdb_mode: "wasm" or "server".
         host: Server host.
         port: Server port.
+        default_color: Column to color the embedding by on first open (the user's
+            later choice persists client-side and overrides this).
 
     Returns:
         Tuple of (FastAPI app, host, port).
     """
     logger.info("Reading parquet schema: %s", parquet_path)
-    all_columns = _get_parquet_columns(parquet_path)
+    parquet_reader = pq.ParquetFile(str(parquet_path))
+    all_columns = list(parquet_reader.schema_arrow.names)
     logger.info("  %d total columns", len(all_columns))
+
+    # New (Seurat) extracts store genes in a memory-mapped sparse sidecar; the
+    # parquet then holds metadata only. Legacy extracts (h5ad/parquet) keep
+    # gene columns inside the parquet and lazy-load them via pyarrow.
+    gene_store: GeneStore | None = None
+    if has_gene_store(parquet_path):
+        gene_store = GeneStore(parquet_path.with_suffix(".genes"))
+        logger.info("Using sparse gene sidecar: %d genes", gene_store.n_genes)
 
     reductions = detect_reductions(all_columns)
     if not reductions:
@@ -182,7 +190,10 @@ def create_scryo_server(
         df = df.rename(columns=rename_map)
         meta_columns = [rename_map.get(c, c) for c in meta_columns]
         reductions = {
-            rename_map.get(k, k): (rename_map.get(v[0], v[0]), rename_map.get(v[1], v[1]))
+            rename_map.get(k, k): (
+                rename_map.get(v[0], v[0]),
+                rename_map.get(v[1], v[1]),
+            )
             for k, v in reductions.items()
         }
         default_reduc = rename_map.get(default_reduc, default_reduc)
@@ -194,6 +205,15 @@ def create_scryo_server(
 
     df["__row_index__"] = range(len(df))
     df["__rowid"] = range(len(df))
+
+    if default_color is not None:
+        default_color = rename_map.get(default_color, default_color)
+        gene_cols = gene_store.column_names if gene_store is not None else gene_columns
+        if default_color not in df.columns and default_color not in set(gene_cols):
+            logger.warning("--default-color %r not found; ignoring", default_color)
+            default_color = None
+        else:
+            logger.info("Default color column: %s", default_color)
 
     props: dict = {
         "data": {
@@ -211,9 +231,13 @@ def create_scryo_server(
     app = _make_scryo_server(
         df=df,
         metadata=metadata,
-        parquet_path=parquet_path,
+        parquet_reader=parquet_reader,
+        all_columns=all_columns,
         reductions=reductions,
         default_reduc=default_reduc,
+        gene_store=gene_store,
+        default_color=default_color,
+        dataset_id=parquet_path.stem,
     )
 
     return app, host, port
@@ -223,9 +247,13 @@ def _make_scryo_server(
     *,
     df: pd.DataFrame,
     metadata: dict,
-    parquet_path: Path,
+    parquet_reader: pq.ParquetFile,
+    all_columns: list[str],
     reductions: dict[str, tuple[str, str]],
     default_reduc: str,
+    gene_store: GeneStore | None = None,
+    default_color: str | None = None,
+    dataset_id: str = "scryo",
 ) -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI()
@@ -237,6 +265,15 @@ def _make_scryo_server(
         allow_headers=["*"],
         expose_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def no_cache(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # The bundled frontend uses fixed asset names (e.g. /assets/index.js)
+        # with no content hash, so browsers would otherwise serve a stale viewer
+        # after a rebuild. no-cache forces revalidation (cheap 304s via ETag).
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     _mount_bytes(
         app,
@@ -252,9 +289,17 @@ def _make_scryo_server(
     @app.get("/data/scryo/reductions")
     async def get_reductions() -> dict:
         return {
-            "reductions": {name: {"x": xy[0], "y": xy[1]} for name, xy in reductions.items()},
+            "reductions": {
+                name: {"x": xy[0], "y": xy[1]} for name, xy in reductions.items()
+            },
             "default": default_reduc,
         }
+
+    @app.get("/data/scryo/config")
+    async def get_config() -> dict:
+        # dataset_id namespaces client-side persistence so different deployments
+        # don't share a saved color column in localStorage.
+        return {"dataset_id": dataset_id, "default_color": default_color}
 
     con = duckdb.connect(":memory:")
     con.execute("CREATE TABLE dataset AS SELECT * FROM df")
@@ -270,7 +315,9 @@ def _make_scryo_server(
                     return JSONResponse({})
                 elif command == "arrow":
                     buf = _arrow_to_bytes(result.arrow())
-                    return Response(buf, headers={"Content-Type": "application/octet-stream"})
+                    return Response(
+                        buf, headers={"Content-Type": "application/octet-stream"}
+                    )
                 elif command == "json":
                     data = result.df().to_json(orient="records")
                     return Response(data, headers={"Content-Type": "application/json"})
@@ -292,11 +339,22 @@ def _make_scryo_server(
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(executor, lambda: handle_query(data))
 
-    all_parquet_columns = _get_parquet_columns(parquet_path)
-    gene_columns_all = [c for c in all_parquet_columns if _is_gene_column(c)]
-    gene_names_unique = sorted({c.rsplit("_", 1)[0] for c in gene_columns_all})
-    available_assays = sorted({c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c})
+    if gene_store is not None:
+        gene_columns_all = gene_store.column_names
+        gene_names_unique = sorted(gene_store.gene_names)
+        available_assays = [gene_store.assay]
+    else:
+        gene_columns_all = [c for c in all_columns if _is_gene_column(c)]
+        gene_names_unique = sorted({c.rsplit("_", 1)[0] for c in gene_columns_all})
+        available_assays = sorted(
+            {c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c}
+        )
+    gene_columns_set = set(gene_columns_all)
     loaded_columns: set[str] = set()
+    # pyarrow ParquetFile.read() isn't documented as thread-safe; serialize
+    # the executor's load-column workers behind a lock. Single-gene reads
+    # are ~1 ms so contention is negligible.
+    parquet_reader_lock = threading.Lock()
 
     @app.get("/data/scryo/genes")
     async def get_genes() -> dict:
@@ -306,30 +364,57 @@ def _make_scryo_server(
             "count": len(gene_names_unique),
         }
 
+    def _load_from_sparse(column: str) -> None:
+        # Read just this gene's non-zero (cell, value) pairs from the mmap and
+        # write only those rows into DuckDB -- O(nnz_in_gene), no dense column.
+        assert gene_store is not None
+        cells, vals = gene_store.read_column(column)
+        with con.cursor() as cursor:
+            cursor.execute(
+                f'ALTER TABLE dataset ADD COLUMN IF NOT EXISTS "{column}" DOUBLE DEFAULT 0'
+            )
+            if len(cells):
+                tbl = pa.table({"__rid": pa.array(cells), "__val": pa.array(vals)})
+                cursor.register("_gene_arrow", tbl)
+                cursor.execute(
+                    f"""
+                    UPDATE dataset SET "{column}" = g.__val
+                    FROM _gene_arrow g WHERE dataset.__rowid = g.__rid
+                """
+                )
+                cursor.execute("DROP VIEW IF EXISTS _gene_arrow")
+
+    def _load_from_parquet(column: str) -> None:
+        with parquet_reader_lock:
+            table = parquet_reader.read(columns=[column], use_threads=False)
+        with con.cursor() as cursor:
+            cursor.execute(
+                f'ALTER TABLE dataset ADD COLUMN IF NOT EXISTS "{column}" DOUBLE DEFAULT 0'
+            )
+            cursor.register("_gene_arrow", table)
+            cursor.execute(
+                f"""
+                UPDATE dataset SET "{column}" = g."{column}"
+                FROM (SELECT "{column}", row_number() OVER () - 1 AS __rid FROM _gene_arrow) g
+                WHERE dataset.__rowid = g.__rid
+            """
+            )
+            cursor.execute("DROP VIEW IF EXISTS _gene_arrow")
+
     @app.post("/data/scryo/load-column")
     async def load_column(req: Request) -> Response:
         body = await req.json()
         column = body.get("column")
-        if not column or column not in gene_columns_all:
+        if not column or column not in gene_columns_set:
             return JSONResponse({"error": f"Unknown column: {column}"}, status_code=400)
         if column in loaded_columns:
             return JSONResponse({"status": "already_loaded", "column": column})
 
         def _load() -> None:
-            import pyarrow.parquet as pq
-
-            table = pq.read_table(str(parquet_path), columns=[column])
-            with con.cursor() as cursor:
-                cursor.execute(
-                    f'ALTER TABLE dataset ADD COLUMN IF NOT EXISTS "{column}" DOUBLE DEFAULT 0'
-                )
-                cursor.register("_gene_arrow", table)
-                cursor.execute(f"""
-                    UPDATE dataset SET "{column}" = g."{column}"
-                    FROM (SELECT "{column}", row_number() OVER () - 1 AS __rid FROM _gene_arrow) g
-                    WHERE dataset.__rowid = g.__rid
-                """)
-                cursor.execute("DROP VIEW IF EXISTS _gene_arrow")
+            if gene_store is not None:
+                _load_from_sparse(column)
+            else:
+                _load_from_parquet(column)
             loaded_columns.add(column)
 
         await asyncio.get_running_loop().run_in_executor(executor, _load)
