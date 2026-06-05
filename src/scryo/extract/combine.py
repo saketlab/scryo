@@ -106,9 +106,7 @@ def write_streamed_parquet(
         cell_batch,
     )
 
-    with pq.ParquetWriter(
-        output_path, schema, compression="zstd", compression_level=3
-    ) as writer:
+    with pq.ParquetWriter(output_path, schema, compression="zstd", compression_level=3) as writer:
         for bi in range(n_batches):
             start = bi * cell_batch
             end = min(start + cell_batch, n_cells)
@@ -128,9 +126,7 @@ def write_streamed_parquet(
 
             row_group = pa.Table.from_arrays(arrays, schema=schema)
             writer.write_table(row_group)
-            logger.info(
-                "  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end
-            )
+            logger.info("  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end)
 
     size_gb = output_path.stat().st_size / 1e9
     logger.info("Done: %s (%.2f GB)", output_path, size_gb)
@@ -186,9 +182,7 @@ def combine_chunks(
         cell_batch,
     )
 
-    with pq.ParquetWriter(
-        output_path, schema, compression="zstd", compression_level=3
-    ) as writer:
+    with pq.ParquetWriter(output_path, schema, compression="zstd", compression_level=3) as writer:
         for bi in range(n_batches):
             start = bi * cell_batch
             end = min(start + cell_batch, n_cells)
@@ -199,9 +193,7 @@ def combine_chunks(
                 arrays.extend(ct.slice(start, end - start).columns)
             row_group = pa.Table.from_arrays(arrays, schema=schema)
             writer.write_table(row_group)
-            logger.info(
-                "  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end
-            )
+            logger.info("  row group %d/%d (cells %d-%d)", bi + 1, n_batches, start, end)
 
     size_gb = output_path.stat().st_size / 1e9
     logger.info("Done: %s (%.2f GB)", output_path, size_gb)

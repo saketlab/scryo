@@ -57,6 +57,13 @@ dmypy.json
 .pyright/
 .pylint.d/
 
+# Generated viewer bundle — built from frontend/ into the wheel by hatch_build.py
+# (see [tool.hatch.build.targets.wheel].artifacts), not committed.
+src/scryo/static/
+
+# Stray screenshots at repo root
+/Screenshot*.png
+
 # Build artifacts
 build/
 dist/

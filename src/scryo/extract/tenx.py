@@ -63,9 +63,7 @@ def extract_h5(
 
     unique_genes = set(gene_names)
     if len(unique_genes) < n_genes:
-        logger.info(
-            "  Disambiguating %d duplicate gene names", n_genes - len(unique_genes)
-        )
+        logger.info("  Disambiguating %d duplicate gene names", n_genes - len(unique_genes))
         gene_names = _make_unique(gene_names)
 
     # On-disk layout is genes x cells (CSC). Transpose then convert to CSR
@@ -247,15 +245,11 @@ def _parse_directory(analysis_dir: Path) -> dict[str, pd.DataFrame]:
         kind = _classify(rel)
         if kind is None:
             continue
-        parsed[rel] = _read_relevant_columns(
-            csv_path.read_bytes(), kind.split(":", 1)[0]
-        )
+        parsed[rel] = _read_relevant_columns(csv_path.read_bytes(), kind.split(":", 1)[0])
     return parsed
 
 
-def _assemble_metadata(
-    parsed: dict[str, pd.DataFrame], barcodes: list[str]
-) -> pd.DataFrame:
+def _assemble_metadata(parsed: dict[str, pd.DataFrame], barcodes: list[str]) -> pd.DataFrame:
     """Index-align Cell Ranger CSVs against the input barcode list."""
     if not parsed:
         raise RuntimeError(
@@ -285,9 +279,7 @@ def _assemble_metadata(
                 continue
             label = kind.split(":", 1)[1]
             col = sub.iloc[:, 0]
-            base[label] = pd.Categorical(
-                col.reindex(base.index).astype("string").fillna("")
-            )
+            base[label] = pd.Categorical(col.reindex(base.index).astype("string").fillna(""))
             n_missing = (base[label] == "").sum()
             if n_missing:
                 logger.warning("  %d cells have no %s assignment", n_missing, label)

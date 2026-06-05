@@ -26,9 +26,7 @@ _R_SCRIPT = Path(__file__).parent / "extract_seurat.R"
 def check_r_available() -> bool:
     """Check if Rscript is available on PATH."""
     try:
-        result = subprocess.run(
-            ["Rscript", "--version"], capture_output=True, text=True
-        )
+        result = subprocess.run(["Rscript", "--version"], capture_output=True, text=True)
         return result.returncode == 0
     except FileNotFoundError:
         return False
@@ -101,9 +99,7 @@ class _ProgressRenderer:
     def start_bar(self, desc: str, total: int) -> None:
         with self._lock:
             self._close()
-            self._bar = tqdm(
-                total=total, desc=desc, unit="nnz", unit_scale=True, leave=True
-            )
+            self._bar = tqdm(total=total, desc=desc, unit="nnz", unit_scale=True, leave=True)
 
     def update_bar(self, done: int) -> None:
         with self._lock:
@@ -210,7 +206,5 @@ def extract_seurat(rds_path: Path, output_path: Path) -> Path:
         raise RuntimeError("R extraction failed:\n" + "\n".join(tail[-20:]))
 
     elapsed = time.monotonic() - start
-    logger.info(
-        "Extraction complete in %.0fs: %s (+ %s)", elapsed, output_path, sidecar.name
-    )
+    logger.info("Extraction complete in %.0fs: %s (+ %s)", elapsed, output_path, sidecar.name)
     return output_path

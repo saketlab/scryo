@@ -175,9 +175,7 @@ def _launch_server(
     click.echo()
     click.echo(f"  Data:   {click.style(str(parquet_path), dim=True)}")
     click.echo(f"  DuckDB: {click.style(duckdb_mode, fg='cyan')}")
-    click.echo(
-        f"  URL:    {click.style(f'http://{host}:{port}', fg='cyan', bold=True)}"
-    )
+    click.echo(f"  URL:    {click.style(f'http://{host}:{port}', fg='cyan', bold=True)}")
     click.echo()
     click.echo(click.style("  Press CTRL+C to quit", dim=True))
     click.echo()

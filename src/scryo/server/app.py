@@ -67,9 +67,7 @@ def _mount_bytes(
         content = get_content()
         rng = _parse_range(request, len(content))
         length = (rng[1] - rng[0]) if rng else len(content)
-        return Response(
-            headers={"Content-Length": str(length), "Content-Type": media_type}
-        )
+        return Response(headers={"Content-Length": str(length), "Content-Type": media_type})
 
     @app.get(url)
     async def get(request: Request) -> Response:
@@ -122,10 +120,7 @@ _NON_GENE_WITH_ASSAY_SUFFIX = frozenset(
 
 
 def _is_gene_column(col: str) -> bool:
-    return (
-        any(col.endswith(s) for s in _GENE_SUFFIXES)
-        and col not in _NON_GENE_WITH_ASSAY_SUFFIX
-    )
+    return any(col.endswith(s) for s in _GENE_SUFFIXES) and col not in _NON_GENE_WITH_ASSAY_SUFFIX
 
 
 def create_scryo_server(
@@ -289,9 +284,7 @@ def _make_scryo_server(
     @app.get("/data/scryo/reductions")
     async def get_reductions() -> dict:
         return {
-            "reductions": {
-                name: {"x": xy[0], "y": xy[1]} for name, xy in reductions.items()
-            },
+            "reductions": {name: {"x": xy[0], "y": xy[1]} for name, xy in reductions.items()},
             "default": default_reduc,
         }
 
@@ -315,9 +308,7 @@ def _make_scryo_server(
                     return JSONResponse({})
                 elif command == "arrow":
                     buf = _arrow_to_bytes(result.arrow())
-                    return Response(
-                        buf, headers={"Content-Type": "application/octet-stream"}
-                    )
+                    return Response(buf, headers={"Content-Type": "application/octet-stream"})
                 elif command == "json":
                     data = result.df().to_json(orient="records")
                     return Response(data, headers={"Content-Type": "application/json"})
@@ -346,9 +337,7 @@ def _make_scryo_server(
     else:
         gene_columns_all = [c for c in all_columns if _is_gene_column(c)]
         gene_names_unique = sorted({c.rsplit("_", 1)[0] for c in gene_columns_all})
-        available_assays = sorted(
-            {c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c}
-        )
+        available_assays = sorted({c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c})
     gene_columns_set = set(gene_columns_all)
     loaded_columns: set[str] = set()
     # pyarrow ParquetFile.read() isn't documented as thread-safe; serialize

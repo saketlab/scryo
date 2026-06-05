@@ -76,9 +76,7 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
             barcode_frac = float(cats.str.endswith("-1").mean()) if len(cats) else 0.0
         else:
             sample = values.dropna().astype(str).head(1000)
-            barcode_frac = (
-                float(sample.str.endswith("-1").mean()) if len(sample) else 0.0
-            )
+            barcode_frac = float(sample.str.endswith("-1").mean()) if len(sample) else 0.0
         if barcode_frac > 0.5:
             logger.info("  Removing barcode column: %s", col)
             meta = meta.drop(columns=[col])

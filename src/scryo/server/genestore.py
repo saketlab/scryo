@@ -36,9 +36,7 @@ class GeneStore:
 
         # indptr is small (n_genes+1 ints); load it eagerly. indices/data are
         # large -- memory-map them so reads page in lazily.
-        self.indptr = np.fromfile(sidecar / "indptr.bin", dtype=np.int32).astype(
-            np.int64
-        )
+        self.indptr = np.fromfile(sidecar / "indptr.bin", dtype=np.int32).astype(np.int64)
         self.indices = np.memmap(sidecar / "indices.bin", dtype=np.int32, mode="r")
         self.data = np.memmap(sidecar / "data.bin", dtype=np.float64, mode="r")
         if self.indptr.shape[0] != self.n_genes + 1:
