@@ -1,0 +1,29 @@
+{
+  "name": "@embedding-atlas/workspace",
+  "private": true,
+  "workspaces": [
+    "packages/utils",
+    "packages/component",
+    "packages/viewer",
+    "packages/umap/umap-wasm",
+    "packages/density-clustering"
+  ],
+  "scripts": {
+    "build": "./scripts/build.sh",
+    "test:js": "npm run test -w @embedding-atlas/density-clustering -w @embedding-atlas/umap-wasm -w @embedding-atlas/utils",
+    "test:rust": "(cd packages/density-clustering && cargo test) && (cd packages/umap && cargo test)",
+    "test": "npm run test:js && npm run test:rust",
+    "check": "npm run check -w @embedding-atlas/component -w @embedding-atlas/viewer",
+    "check-format": "prettier -c . && uvx ruff check && uvx ruff format --check --exclude '*.ipynb'"
+  },
+  "devDependencies": {
+    "prettier": "^3.8.1",
+    "prettier-plugin-svelte": "^3.5.1"
+  },
+  "dependencies": {
+    "csstype": "^3.1.3",
+    "svelte": "^5.54.1",
+    "typescript": "^5.9.3",
+    "unplugin-icons": "^23.0.1"
+  }
+}
