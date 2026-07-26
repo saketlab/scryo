@@ -11,8 +11,9 @@ export async function initializeDatabase(
   type: "wasm" | "socket" | "rest",
   uri: string | null | undefined = undefined,
 ) {
-  const db = await createDuckDB();
+  // building this outside the branch cost a 33 MB download on every rest/socket load
   if (type == "wasm") {
+    const db = await createDuckDB();
     const conn = await wasmConnector({ duckdb: db.duckdb, connection: db.connection });
     coordinator.databaseConnector(conn);
   } else if (type == "socket") {
@@ -69,7 +70,7 @@ export interface EmbeddingLegend {
     predicate: any;
     count: number;
   }[];
-  /** Full color palette for all category indices (used for continuous 256-bin mode). */
+  /** Full color palette for all category indices. */
   categoryColors?: string[];
   /** Whether this is a continuous color scale (gradient bar legend instead of dots). */
   isContinuous?: boolean;
@@ -89,6 +90,26 @@ export async function distinctCount(coordinator: Coordinator, table: string, col
   return r.get(0).count;
 }
 
+export async function distinctCounts(
+  coordinator: Coordinator,
+  table: string,
+  columns: string[],
+): Promise<Map<string, number>> {
+  if (columns.length == 0) {
+    return new Map();
+  }
+  let alias = (index: number) => `distinct_${index}`;
+  try {
+    let select = columns.map((c, i) => `COUNT(DISTINCT ${SQL.column(c)}) AS ${SQL.column(alias(i))}`).join(", ");
+    let row = (await coordinator.query(`SELECT ${select} FROM ${table}`)).get(0);
+    return new Map(columns.map((c, i) => [c, Number(row[alias(i)])]));
+  } catch {
+    // one unsupported type fails the whole batch
+    let counts = await Promise.all(columns.map((c) => distinctCount(coordinator, table, c)));
+    return new Map(columns.map((c, i) => [c, counts[i]]));
+  }
+}
+
 export type JSType = "string" | "number" | "string[]" | "Date";
 
 export function jsTypeFromDBType(dbType: string): JSType | null {
@@ -101,9 +122,7 @@ export function jsTypeFromDBType(dbType: string): JSType | null {
   } else if (dbType.match(/^(VARCHAR|TEXT)\[\d*\]$/)) {
     return "string[]";
   } else if (dbType.startsWith("ENUM(")) {
-    // DuckDB represents pandas Categorical as ENUM('a','b',...). Treat it
-    // like a string so the "Color by" dropdown and category legends pick
-    // categorical metadata columns up.
+    // DuckDB maps pandas Categorical to ENUM; treat it as a string so "Color by" lists it
     return "string";
   } else {
     return null;

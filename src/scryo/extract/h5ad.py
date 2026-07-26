@@ -21,9 +21,7 @@ _CELLTYPE_CANDIDATES = (
     "seurat_clusters",
 )
 
-# ``adata.var`` column names that commonly hold human-readable gene symbols
-# when ``var_names`` are Ensembl (or other stable) IDs. Checked in order, and
-# the first match wins. ``feature_name`` is the CellxGene schema default.
+# gene-symbol columns to try in adata.var when var_names are IDs; first match wins
 _GENE_SYMBOL_CANDIDATES = (
     "feature_name",
     "gene_symbols",
@@ -105,8 +103,7 @@ def extract_h5ad(h5ad_path: Path, output_path: Path) -> Path:
             "Try `adata.X = adata.layers['counts']` (or another layer) before saving."
         )
 
-    # CSR for sparse: write_chunked_parquet streams by row batches, and CSR
-    # fancy row indexing for sort_idx is O(len(sort_idx)) vs O(nnz) on CSC.
+    # CSR: parquet is written by row batch, and row indexing is O(len(sort_idx)) not O(nnz)
     if issparse(X):
         X_out: csr_matrix | np.ndarray = csr_matrix(X)
         if sort_idx is not None:

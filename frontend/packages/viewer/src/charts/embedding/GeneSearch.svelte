@@ -18,23 +18,17 @@
   let activeGene: string | null = $state(null);
   let loading = $state(false);
   let highlightIndex = $state(-1);
-  let genesLoaded = $state(false);
 
-  // Fetch gene list on mount (run once)
-  if (!genesLoaded) {
-    fetch("/data/scryo/genes")
-      .then((r) => r.json())
-      .then((data) => {
-        genes = data.genes;
-        assays = data.assays;
-        genesLoaded = true;
-        if (assays.length > 0 && !assays.includes(selectedAssay)) {
-          selectedAssay = assays[0];
-        }
-      });
-  }
+  fetch("/data/scryo/genes")
+    .then((r) => r.json())
+    .then((data) => {
+      genes = data.genes;
+      assays = data.assays;
+      if (assays.length > 0 && !assays.includes(selectedAssay)) {
+        selectedAssay = assays[0];
+      }
+    });
 
-  // Filter genes as user types (derived, not effect)
   let filteredGenes = $derived.by(() => {
     let q = searchQuery.toLowerCase().trim();
     if (q.length < 1) return [];
@@ -50,7 +44,6 @@
     searchQuery = "";
 
     try {
-      // Load gene column into DuckDB dataset table
       let resp = await fetch("/data/scryo/load-column", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -63,13 +56,11 @@
         return;
       }
 
-      // Pin the gene
       if (!pinnedGenes.find((p) => p.name === geneName && p.assay === selectedAssay)) {
         pinnedGenes = [...pinnedGenes, { name: geneName, assay: selectedAssay }];
       }
       activeGene = geneName;
 
-      // Trigger coloring
       onGeneSelect(column);
     } finally {
       loading = false;
@@ -91,7 +82,6 @@
 
   function onAssayChange(assay: string) {
     selectedAssay = assay;
-    // If there's an active gene, reload with new assay
     if (activeGene) {
       selectGene(activeGene);
     }
@@ -183,7 +173,9 @@
       {#each pinnedGenes as gene}
         {@const isActive = activeGene === gene.name && selectedAssay === gene.assay}
         <div
-          class="flex items-center justify-between px-2 py-1 rounded-md text-xs cursor-pointer transition-colors {isActive ? 'bg-blue-100 dark:bg-blue-900 text-blue-500' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}"
+          class="flex items-center justify-between px-2 py-1 rounded-md text-xs cursor-pointer transition-colors {isActive
+            ? 'bg-blue-100 dark:bg-blue-900 text-blue-500'
+            : 'hover:bg-slate-100 dark:hover:bg-slate-700'}"
           onclick={() => onClickPinned(gene)}
         >
           <span>
@@ -192,7 +184,10 @@
           </span>
           <button
             class="text-slate-400 hover:text-red-400 ml-2 px-1"
-            onclick={(e: MouseEvent) => { e.stopPropagation(); removePinned(gene); }}
+            onclick={(e: MouseEvent) => {
+              e.stopPropagation();
+              removePinned(gene);
+            }}
           >
             ×
           </button>

@@ -9,10 +9,118 @@
       body {
         overscroll-behavior-x: none;
       }
+
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        font:
+          500 14px/1.4 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+        color: #475569;
+        background: #e2e8f0;
+      }
+      #boot .row {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+      }
+      #boot .elapsed {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.65;
+      }
+      #boot .track {
+        width: 13rem;
+        height: 3px;
+        border-radius: 999px;
+        background: #cbd5e1;
+        overflow: hidden;
+      }
+      #boot .bar {
+        height: 100%;
+        width: 0;
+        border-radius: 999px;
+        background: #3b82f6;
+        transition: width 0.1s linear;
+      }
+      #boot .spinner {
+        width: 1.15rem;
+        height: 1.15rem;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: boot-spin 0.7s linear infinite;
+        color: #3b82f6;
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .spinner {
+          animation-duration: 2.4s;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        #boot {
+          color: #cbd5e1;
+          background: #1e293b;
+        }
+        #boot .track {
+          background: #334155;
+        }
+      }
+      #boot[data-known="0"] .track {
+        visibility: hidden;
+      }
     </style>
   </head>
   <body>
     <div id="app" class="embedding-atlas-root"></div>
+    <div id="boot" data-known="0">
+      <div class="row">
+        <div class="spinner"></div>
+        <span>Loading viewer…</span><span class="elapsed"></span>
+      </div>
+      <div class="track"><div class="bar"></div></div>
+    </div>
+    <script>
+      // a module script reports no download progress, so estimate from previous loads
+      (function () {
+        var KEY = "scryo:boot-ms";
+        var boot = document.getElementById("boot");
+        var elapsed = boot.querySelector(".elapsed");
+        var bar = boot.querySelector(".bar");
+        var start = performance.now();
+        var expected = 0;
+        try {
+          expected = +localStorage.getItem(KEY) || 0;
+        } catch (e) {}
+        boot.dataset.known = expected ? "1" : "0";
+        var timer = setInterval(function () {
+          var ms = performance.now() - start;
+          elapsed.textContent = expected
+            ? (ms / 1000).toFixed(0) + "s of ~" + Math.max(1, Math.round(expected / 1000)) + "s"
+            : (ms / 1000).toFixed(0) + "s";
+          // asymptotic past the estimate; a full bar that keeps waiting reads as stuck
+          var f = ms / expected;
+          bar.style.width = (expected ? (f < 1 ? f * 92 : 92 + 8 * (1 - 1 / (1 + (f - 1) * 3))) : 0) + "%";
+        }, 100);
+        window.__scryoBootDone = function () {
+          clearInterval(timer);
+          try {
+            localStorage.setItem(KEY, String(Math.round(performance.now() - start)));
+          } catch (e) {}
+        };
+      })();
+    </script>
     <script type="module" src="./src/app/main.ts"></script>
   </body>
 </html>

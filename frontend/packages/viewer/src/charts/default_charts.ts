@@ -2,7 +2,7 @@
 
 import type { Coordinator } from "@uwdata/mosaic-core";
 
-import { columnDescriptions, distinctCount } from "../utils/database.js";
+import { columnDescriptions, distinctCounts } from "../utils/database.js";
 import type { BuiltinChartSpec } from "./chart_types.js";
 import type { EmbeddingSpec } from "./embedding/types.js";
 import type { InstancesSpec } from "./instances/types.js";
@@ -75,20 +75,21 @@ export async function defaultCharts(options: {
     charts.push(spec);
   }
 
-  for (let item of columns) {
-    if (item.jsType == null) {
-      continue;
-    }
+  let candidates = columns.filter(
+    (item) =>
+      item.jsType != null &&
+      (config.include == undefined || config.include.indexOf(item.name) >= 0) &&
+      exclude.indexOf(item.name) < 0,
+  );
 
-    // If include is specified, only process columns in the include list.
-    if (config.include != undefined && config.include.indexOf(item.name) < 0) {
-      continue;
-    }
-    // If exclude is specified, skip excluded columns.
-    if (exclude.indexOf(item.name) >= 0) {
-      continue;
-    }
+  let counted = candidates.filter((item) => config.override?.[item.name] === undefined);
+  let distinctByColumn = await distinctCounts(
+    coordinator,
+    table,
+    counted.map((item) => item.name),
+  );
 
+  for (let item of candidates) {
     // If we have an override, use the override directly.
     let override = config.override?.[item.name];
     if (override !== undefined) {
@@ -98,7 +99,7 @@ export async function defaultCharts(options: {
       continue;
     }
 
-    let distinct = await distinctCount(coordinator, table, item.name);
+    let distinct = distinctByColumn.get(item.name) ?? 0;
     // Skip the column if there's only a single unique value.
     if (distinct <= 1) {
       continue;

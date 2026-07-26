@@ -34,15 +34,13 @@ class GeneStore:
                 f"genes.txt has {len(self.gene_names)} names, info says {self.n_genes}"
             )
 
-        # indptr is small (n_genes+1 ints); load it eagerly. indices/data are
-        # large -- memory-map them so reads page in lazily.
+        # indptr is small enough to load eagerly; indices/data page in lazily
         self.indptr = np.fromfile(sidecar / "indptr.bin", dtype=np.int32).astype(np.int64)
         self.indices = np.memmap(sidecar / "indices.bin", dtype=np.int32, mode="r")
         self.data = np.memmap(sidecar / "data.bin", dtype=np.float64, mode="r")
         if self.indptr.shape[0] != self.n_genes + 1:
             raise ValueError("indptr length does not match n_genes + 1")
 
-        # Column name (<gene>_<assay>) -> gene index.
         self._col_to_idx: dict[str, int] = {
             f"{g}_{self.assay}": i for i, g in enumerate(self.gene_names)
         }

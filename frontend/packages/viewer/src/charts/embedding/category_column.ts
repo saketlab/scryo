@@ -18,7 +18,7 @@ export interface EmbeddingLegend {
     predicate: any;
     count: number;
   }[];
-  /** Full color palette for all category indices (used for continuous 256-bin mode). */
+  /** Full color palette for all category indices. */
   categoryColors?: string[];
   /** Whether this is a continuous color scale. */
   isContinuous?: boolean;
@@ -77,16 +77,11 @@ const scaleInterpolators: Record<string, (t: number) => string> = {
   warm: d3.interpolateWarm,
 };
 
-/**
- * Recolor an existing continuous legend with a different scale.
- * No DuckDB queries needed — just rebuilds the color arrays.
- */
+/** Rebuild a continuous legend's colour arrays for a new scale; no DuckDB queries. */
 export function recolorContinuousLegend(legend: EmbeddingLegend, scaleName: string): EmbeddingLegend {
   if (!legend.isContinuous || !legend.dataRange) return legend;
 
-  // Capped at 64 to fit the WebGL2 shader's `colorScheme[64]` uniform; bins
-  // beyond 63 fall through to the shader's gray fallback. Visually
-  // indistinguishable from 256 bins for sequential palettes.
+  // the WebGL2 shader's colorScheme uniform holds 64; beyond that it greys out
   const NUM_BINS = 64;
   let colors = generatePalette(scaleName, NUM_BINS);
   let { min: minVal, max: maxVal } = legend.dataRange;
@@ -133,6 +128,19 @@ export function generatePalette(scaleName: string, numBins: number = 64): string
   return colors;
 }
 
+// safe to raise; density mode falls back to points above maxDensityModeCategories
+const MAX_DISCRETE_CATEGORIES = 48;
+
+/** Deploy-supplied colours per column, keyed by category label. */
+let paletteRequest: Promise<Record<string, Record<string, string>>> | null = null;
+
+function deployedPalettes(): Promise<Record<string, Record<string, string>>> {
+  paletteRequest ??= fetch("/data/scryo/colors")
+    .then((r) => (r.ok ? r.json() : {}))
+    .catch(() => ({}));
+  return paletteRequest;
+}
+
 export async function makeCategoryColumn(
   coordinator: Coordinator,
   table: string,
@@ -148,7 +156,7 @@ export async function makeCategoryColumn(
   }
   let jsType = jsTypeFromDBType(desc.column_type);
   if (jsType == "string") {
-    return await makeDiscreteCategoryColumn(coordinator, table, column, 10, theme);
+    return await makeDiscreteCategoryColumn(coordinator, table, column, MAX_DISCRETE_CATEGORIES, theme);
   } else if (jsType == "number" || jsType == "Date") {
     let distinct = await distinctCount(coordinator, table, column);
     console.log(`[scryo] Column ${column}: type=${jsType}, distinct=${distinct}`);
@@ -219,6 +227,10 @@ async function makeDiscreteCategoryColumn(
   let nullCount = countMap.get(nullIndex) ?? 0;
 
   let colors = resolveCategoryColors(theme, values.length);
+  let palette = (await deployedPalettes())[column];
+  if (palette) {
+    colors = values.map(({ value }, i) => palette[value] ?? colors[i]);
+  }
 
   let legend: EmbeddingLegend["legend"] = values.map(({ value }, i) => ({
     label: value,
@@ -375,13 +387,9 @@ async function makeBinnedNumericColumn(
 /**
  * Linear quantization for continuous numeric columns.
  *
- * Capped at 64 bins because the upstream WebGL2 shader's color uniform array
- * is `vec4 colorScheme[64]`; cells whose bin index is >= 64 fall through to
- * the shader's gray fallback (`vec4(0.5, 0.5, 0.5, 1)`). 64 bins are
- * visually indistinguishable from 256 for sequential palettes, and 64 also
- * fits in the positive range of WebGL's signed-byte category attribute.
- * The null bin lives at index 64 → it correctly hits the shader's gray
- * branch, so genuine NaN/null/inf cells remain visually distinct.
+ * 64 bins because the shader's colorScheme uniform holds 64 and the category
+ * attribute is a signed byte. The null bin sits at 64, past the palette, so it
+ * hits the shader's grey fallback.
  */
 async function makeContinuousColumn(
   coordinator: Coordinator,
@@ -393,7 +401,6 @@ async function makeContinuousColumn(
   const NUM_BINS = 64;
   let indexColumnName = `__ev_${column}_id`;
 
-  // Get min/max from data
   let result = Array.from(
     await coordinator.query(`
       SELECT MIN(${SQL.column(column)}) AS min_val, MAX(${SQL.column(column)}) AS max_val
@@ -411,7 +418,6 @@ async function makeContinuousColumn(
     maxVal = minVal + 1;
   }
 
-  // Linear quantization to 0-255
   let range = maxVal - minVal;
   await coordinator.exec(
     `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${SQL.column(indexColumnName)} INTEGER DEFAULT 0`,
@@ -427,10 +433,9 @@ async function makeContinuousColumn(
       END
   `);
 
-  // Generate palette from selected scale
   let colors = generatePalette(scaleName, NUM_BINS);
 
-  // Build a compact legend (only show 5 ticks, not all 256)
+  // 5 ticks, not one per bin
   let legend: EmbeddingLegend["legend"] = [];
   let tickCount = 5;
   for (let t = 0; t < tickCount; t++) {
@@ -445,7 +450,6 @@ async function makeContinuousColumn(
     });
   }
 
-  // Add null entry
   let nullResult = Array.from(
     await coordinator.query(`
       SELECT COUNT(*)::INT AS count FROM ${table}
@@ -458,15 +462,12 @@ async function makeContinuousColumn(
     legend.push({
       label: "(null / nan / inf)",
       color: theme.nullColor,
-      predicate: SQL.or(
-        SQL.isNull(SQL.column(column)),
-        SQL.not(SQL.sql`isfinite(${SQL.column(column)}::DOUBLE)`),
-      ),
+      predicate: SQL.or(SQL.isNull(SQL.column(column)), SQL.not(SQL.sql`isfinite(${SQL.column(column)}::DOUBLE)`)),
       count: nullCount,
     });
   }
 
-  // Include null color at index 256
+  // null colour lands at index NUM_BINS, past the palette
   let allColors = [...colors];
   if (nullCount > 0) {
     allColors.push(theme.nullColor);
@@ -484,7 +485,12 @@ async function makeContinuousColumn(
 
 function resolveCategoryColors(theme: ChartTheme, length: number): string[] {
   if (typeof theme.categoryColors == "function") {
-    return theme.categoryColors(length);
+    let colors = theme.categoryColors(length);
+    if (new Set(colors).size == colors.length) {
+      return colors;
+    }
+    // the category palette cycles past 20; the ordinal ramp stays distinct
+    return resolveOrdinalColors(theme, length);
   } else {
     let result: string[] = [];
     for (let i = 0; i < length; i++) {

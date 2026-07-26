@@ -42,19 +42,26 @@
   import { isolatedWritable } from "../../utils/store.js";
   import type { ChartViewProps, RowID } from "../chart.js";
   import { resolveChartTheme } from "../common/theme.js";
-  import { makeCategoryColumn, CONTINUOUS_SCALES, recolorContinuousLegend, generatePalette } from "./category_column.js";
+  import {
+    makeCategoryColumn,
+    CONTINUOUS_SCALES,
+    recolorContinuousLegend,
+    generatePalette,
+  } from "./category_column.js";
   import GeneSearch from "./GeneSearch.svelte";
+  import MarkerPanel from "./MarkerPanel.svelte";
   import type { EmbeddingSpec, EmbeddingState } from "./types.js";
   import { interpolateViewport } from "./viewport_animation.js";
 
   let selectedColorScale = $state("viridis");
 
-  // Reduction selector state
-  interface ReductionInfo { x: string; y: string; }
+  interface ReductionInfo {
+    x: string;
+    y: string;
+  }
   let availableReductions: Record<string, ReductionInfo> = $state({});
   let currentReduction = $state("");
 
-  // Fetch reductions on mount
   fetch("/data/scryo/reductions")
     .then((r) => r.json())
     .then((data) => {
@@ -70,10 +77,7 @@
     onSpecChange({ data: { ...spec.data, x: reduc.x, y: reduc.y } });
   }
 
-  // Default + persisted color column. The server supplies a deploy-time default
-  // (e.g. unified_cell_annot); once the user picks a column it is saved in the
-  // browser and overrides the default on the next open. Keyed by dataset_id so
-  // separate deployments don't clash.
+  // the user's saved choice overrides the server default; keyed by dataset_id
   let colorStorageKey = $state<string | null>(null);
   let colorInitialized = false;
 
@@ -98,15 +102,14 @@
       if (colorInitialized) return;
       colorInitialized = true;
 
-      // A saved entry (including "" = deliberately cleared) wins over the server
-      // default. Genes aren't persisted, so the saved value is always a column.
+      // a saved "" means deliberately cleared, so it still wins over the default
       let raw: string | null = null;
       try {
         raw = localStorage.getItem(colorStorageKey);
       } catch {
         raw = null;
       }
-      let initial: string | undefined = raw != null ? (raw === "" ? undefined : raw) : cfg.default_color ?? undefined;
+      let initial: string | undefined = raw != null ? (raw === "" ? undefined : raw) : (cfg.default_color ?? undefined);
 
       let validNames = new Set(context.columns.map((c) => c.name));
       if (initial != null && !validNames.has(initial)) initial = undefined;
@@ -116,8 +119,10 @@
     })
     .catch(() => {});
 
+  let genePanelTab = $state("genes");
+
   function handleGeneSelect(column: string) {
-    // Set the gene column as the color column — this triggers makeCategoryColumn
+    // setting the colour column is what triggers makeCategoryColumn
     onSpecChange({ data: { ...spec.data, category: column } });
   }
 
@@ -162,18 +167,23 @@
   let selection = $state.raw<DataPoint[] | null>(null);
   let overlayProps = $state.raw<{ center: DataPoint | null; points: DataPoint[] } | null>(null);
 
-  // Per-category cluster labels, rendered via the custom overlay (the
-  // component's built-in `labels` prop didn't place these reliably).
+  // custom overlay; the component's built-in labels prop placed these unreliably
   let showLabels = $state(true);
   let clusterLabels = $state.raw<Label[] | null>(null);
+
+  let labelRun = 0;
 
   $effect.pre(() => {
     // Read deps so the effect re-runs when any of them change.
     let col = categoryColumn;
     let xCol = spec.data.x;
     let yCol = spec.data.y;
-    let isContinuous = categoryLegend?.isContinuous ?? false;
-    if (!showLabels || col == null || isContinuous) {
+    // a stale run must not overwrite a newer one's labels
+    let run = ++labelRun;
+    // gene columns are added after load and never appear here, so this also
+    // skips the GROUP BY over every distinct expression value
+    let isCategorical = context.columns.some((c) => c.name === col && c.jsType === "string");
+    if (!showLabels || col == null || !isCategorical) {
       clusterLabels = null;
       return;
     }
@@ -189,6 +199,7 @@
           .groupby(SQL.column(col)),
       )
       .then((result: any) => {
+        if (run !== labelRun) return;
         let labels: Label[] = [];
         for (let row of result) {
           if (row.c == null || row.mx == null || row.my == null) continue;
@@ -197,6 +208,7 @@
         clusterLabels = labels.length > 0 ? labels : null;
       })
       .catch(() => {
+        if (run !== labelRun) return;
         clusterLabels = null;
       });
   });
@@ -333,7 +345,9 @@
     y={spec.data.y}
     text={spec.data.text}
     category={categoryLegend?.indexColumn}
-    categoryColors={categoryLegend?.categoryColors ?? categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
+    rowKey={context.id}
+    categoryColors={categoryLegend?.categoryColors ??
+      categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
     config={{
       colorScheme: $colorScheme,
       ...context.embeddingViewConfig,
@@ -385,11 +399,13 @@
           <div class="flex flex-col gap-1.5" style="min-width: 180px;">
             <div
               class="h-3 rounded-sm"
-              style:background="linear-gradient(to right, {(categoryLegend.categoryColors ?? []).slice(0, 64).join(', ')})"
+              style:background="linear-gradient(to right, {(categoryLegend.categoryColors ?? [])
+                .slice(0, 64)
+                .join(', ')})"
             ></div>
             <div class="flex justify-between text-xs text-slate-400">
-              <span>{categoryLegend.legend[0]?.label ?? ''}</span>
-              <span>{categoryLegend.legend[categoryLegend.legend.length - 1]?.label ?? ''}</span>
+              <span>{categoryLegend.legend[0]?.label ?? ""}</span>
+              <span>{categoryLegend.legend[categoryLegend.legend.length - 1]?.label ?? ""}</span>
             </div>
             <select
               class="text-xs bg-transparent border border-slate-300 dark:border-slate-600 rounded px-1 py-0.5 text-slate-400 cursor-pointer"
@@ -403,12 +419,12 @@
               }}
             >
               <optgroup label="Sequential">
-                {#each CONTINUOUS_SCALES.filter((s) => s.category === 'sequential') as scale}
+                {#each CONTINUOUS_SCALES.filter((s) => s.category === "sequential") as scale}
                   <option value={scale.name}>{scale.label}</option>
                 {/each}
               </optgroup>
               <optgroup label="Diverging">
-                {#each CONTINUOUS_SCALES.filter((s) => s.category === 'diverging') as scale}
+                {#each CONTINUOUS_SCALES.filter((s) => s.category === "diverging") as scale}
                   <option value={scale.name}>{scale.label}</option>
                 {/each}
               </optgroup>
@@ -533,10 +549,30 @@
     </div>
   </div>
   <!-- Gene search panel (left side, below toolbar) -->
-  <div class="absolute top-12 left-2 z-10 pointer-events-auto" style="width: 200px;">
+  <div class="absolute top-12 left-2 z-10 pointer-events-auto" style="width: 232px;">
     <div class="p-2 rounded-md bg-slate-100/85 dark:bg-slate-800/85 backdrop-blur-sm">
-      <div class="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">Genes</div>
-      <GeneSearch coordinator={context.coordinator} onGeneSelect={handleGeneSelect} />
+      <div class="flex gap-3 mb-1.5 text-xs font-medium">
+        {#each [{ id: "genes", label: "Genes" }, { id: "markers", label: "Markers" }] as tab}
+          <button
+            class="pb-0.5 border-b-2 transition-colors {genePanelTab === tab.id
+              ? 'border-blue-500 text-slate-700 dark:text-slate-100'
+              : 'border-transparent text-slate-500 dark:text-slate-400'}"
+            onclick={() => (genePanelTab = tab.id)}
+          >
+            {tab.label}
+          </button>
+        {/each}
+      </div>
+      <div class:hidden={genePanelTab !== "genes"}>
+        <GeneSearch coordinator={context.coordinator} onGeneSelect={handleGeneSelect} />
+      </div>
+      {#if genePanelTab === "markers"}
+        <MarkerPanel
+          activeColumn={categoryColumn}
+          onGeneSelect={handleGeneSelect}
+          onResetColor={(column) => setColor(column)}
+        />
+      {/if}
     </div>
   </div>
 </div>

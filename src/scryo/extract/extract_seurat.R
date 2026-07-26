@@ -12,13 +12,10 @@
 #       data.bin     float64    length nnz         (expression values)
 #       info.json                {n_cells, n_genes, nnz, assay, value_dtype}
 #
-# Design: the expression matrix at single-cell scale is ~97% zeros, so we never
-# densify it. We transpose to cells x genes (CSC => each gene is one contiguous
-# column) and dump the raw slots. The server memory-maps these and reads one
-# gene's slice on demand -- O(nnz_in_gene), no dense matrix anywhere.
+# Transposed to cells x genes so each gene is one contiguous CSC column the
+# server can mmap and slice; the matrix is never densified.
 #
-# Progress markers (consumed by seurat.py to drive progress bars) are printed to
-# stdout as `@@SCRYO <event> <payload>` and flushed immediately.
+# Progress markers go to stdout as @@SCRYO <event> <payload>; seurat.py parses them.
 
 suppressPackageStartupMessages({
   library(Seurat)
@@ -52,7 +49,6 @@ assay_name <- DefaultAssay(obj)
 if (!assay_name %in% Assays(obj)) assay_name <- Assays(obj)[1]
 emit("INFO", "assay", assay_name)
 
-# Join split data layers if this is a Seurat v5 object with per-batch layers.
 assay_obj <- obj[[assay_name]]
 data_layers <- grep("^data", Layers(assay_obj), value = TRUE)
 if (length(data_layers) > 1) {
@@ -60,7 +56,6 @@ if (length(data_layers) > 1) {
   obj[[assay_name]] <- JoinLayers(assay_obj)
 }
 
-# --- metadata + reductions -------------------------------------------------
 emit("META_START")
 meta <- obj@meta.data
 cell_ids_meta <- rownames(meta)
@@ -86,7 +81,6 @@ if (!inherits(expr, "dgCMatrix")) expr <- as(expr, "dgCMatrix")
 expr_cells <- colnames(expr)
 gene_names <- rownames(expr)
 
-# Add reduction coordinates (first 2 dims) keyed by the EXPR cell order.
 for (reduc_name in Reductions(obj)) {
   emb <- Embeddings(obj, reduction = reduc_name)
   for (d in 1:min(ncol(emb), 2)) {
@@ -95,7 +89,6 @@ for (reduc_name in Reductions(obj)) {
   emit("INFO", "reduction", reduc_name)
 }
 
-# Align metadata rows to the expression column order, then drop the object.
 ord <- match(expr_cells, cell_ids_meta)
 meta <- meta[ord, , drop = FALSE]
 rownames(meta) <- NULL
@@ -104,10 +97,8 @@ rm(obj); gc(verbose = FALSE)
 write_parquet(meta, out_parquet, compression = "zstd")
 emit("META_DONE", out_parquet, nrow(meta), "cells", ncol(meta), "cols")
 
-# --- gene-major sparse sidecar ---------------------------------------------
-# t(expr): genes x cells (CSC) -> cells x genes (CSC), so each gene is one
-# contiguous column. nnz is unchanged and <= .Machine$integer.max because the
-# input was a valid dgCMatrix, so the int32 @p/@i slots stay valid.
+# transpose puts each gene in one contiguous column; nnz is unchanged, so the
+# int32 @p/@i slots stay valid
 emit("TRANSPOSE_START", length(gene_names), "genes", length(expr_cells), "cells")
 texpr <- t(expr)
 rm(expr); gc(verbose = FALSE)
@@ -120,12 +111,10 @@ emit("TRANSPOSE_DONE", "nnz", nnz)
 writeLines(gene_names, file.path(sidecar, "genes.txt"))
 writeLines(expr_cells, file.path(sidecar, "cells.txt"))
 
-# indptr (small): gene-major column pointers.
 con <- file(file.path(sidecar, "indptr.bin"), "wb")
 writeBin(as.integer(texpr@p), con, size = 4L)
 close(con)
 
-# Helper: write a long vector to a binary file in segments, emitting progress.
 write_binary_chunked <- function(vec, path, size, label, n_segments = 40L) {
   con <- file(path, "wb")
   on.exit(close(con))

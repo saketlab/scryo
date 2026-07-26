@@ -15,8 +15,7 @@ from scryo.extract.combine import write_chunked_parquet
 
 logger = logging.getLogger(__name__)
 
-# Sorted by precedence — first match wins. Cell Ranger emits graphclust + kmeans;
-# leiden is included for hand-built sidecars from scanpy.
+# first match wins; leiden covers hand-built scanpy sidecars
 _SORT_CLUSTER_PRIORITY: tuple[str, ...] = ("graphclust", "kmeans_10_clusters", "leiden")
 
 
@@ -66,10 +65,8 @@ def extract_h5(
         logger.info("  Disambiguating %d duplicate gene names", n_genes - len(unique_genes))
         gene_names = _make_unique(gene_names)
 
-    # On-disk layout is genes x cells (CSC). Transpose then convert to CSR
-    # in the cells x genes orientation: write_chunked_parquet streams by row
-    # batches, and the sort_idx scatter below is O(len(sort_idx)) on CSR
-    # vs O(nnz) on CSC.
+    # on disk it's genes x cells; CSR cells x genes makes the row-batch writes and
+    # the sort scatter below O(len(sort_idx)) instead of O(nnz)
     X = X_genes_cells.T.tocsr()
 
     if analysis_path is None:
@@ -142,8 +139,6 @@ def _find_analysis_sidecar(h5_path: Path) -> Path | None:
         parent / "analysis.tar.gz",
         parent / "analysis",
     ]
-    # Also try the dataset prefix without the trailing 10x suffix words.
-    # Source for these suffixes: 10x Cell Ranger output filename conventions.
     for suffix in ("_filtered_gene_bc_matrices_h5", "_filtered_feature_bc_matrix"):
         if stem.endswith(suffix):
             base = stem[: -len(suffix)]
@@ -154,7 +149,6 @@ def _find_analysis_sidecar(h5_path: Path) -> Path | None:
         if c.exists():
             return c
 
-    # Last resort: any *_analysis.tar.gz in the same directory.
     for c in sorted(parent.glob("*_analysis.tar.gz")):
         if c.exists():
             logger.warning(

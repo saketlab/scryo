@@ -1,4 +1,4 @@
-"""scryo server — self-contained FastAPI app for single-cell visualization."""
+"""scryo server: self-contained FastAPI app for single-cell visualization."""
 
 import asyncio
 import concurrent.futures
@@ -111,8 +111,7 @@ def detect_default_reduction(reductions: dict[str, tuple[str, str]]) -> str | No
     return next(iter(reductions), None)
 
 
-# Seurat writes per-assay cell QC as ``nCount_<assay>`` / ``nFeature_<assay>``.
-# These share the scryo ``<gene>_<assay>`` suffix but are metadata, not genes.
+# nCount_<assay> / nFeature_<assay> share the gene suffix but are metadata
 _GENE_SUFFIXES = ("_RNA", "_SCT")
 _NON_GENE_WITH_ASSAY_SUFFIX = frozenset(
     f"{prefix}_{assay}" for prefix in ("nCount", "nFeature") for assay in ("RNA", "SCT")
@@ -149,9 +148,7 @@ def create_scryo_server(
     all_columns = list(parquet_reader.schema_arrow.names)
     logger.info("  %d total columns", len(all_columns))
 
-    # New (Seurat) extracts store genes in a memory-mapped sparse sidecar; the
-    # parquet then holds metadata only. Legacy extracts (h5ad/parquet) keep
-    # gene columns inside the parquet and lazy-load them via pyarrow.
+    # Seurat extracts keep genes in a sparse sidecar; older ones in the parquet
     gene_store: GeneStore | None = None
     if has_gene_store(parquet_path):
         gene_store = GeneStore(parquet_path.with_suffix(".genes"))
@@ -223,6 +220,22 @@ def create_scryo_server(
     }
     metadata = {"props": props}
 
+    def _load_sidecar_json(suffix: str, label: str) -> bytes | None:
+        path = parquet_path.with_suffix(suffix)
+        if not path.exists():
+            return None
+        try:
+            raw = path.read_bytes()
+            json.loads(raw)
+        except (OSError, ValueError):
+            logger.warning("Ignoring unreadable %s file: %s", label, path)
+            return None
+        logger.info("%s: loaded %s", label, path.name)
+        return raw
+
+    markers = _load_sidecar_json(".markers.json", "Markers")
+    colors = _load_sidecar_json(".colors.json", "Colors")
+
     app = _make_scryo_server(
         df=df,
         metadata=metadata,
@@ -233,6 +246,8 @@ def create_scryo_server(
         gene_store=gene_store,
         default_color=default_color,
         dataset_id=parquet_path.stem,
+        markers=markers,
+        colors=colors,
     )
 
     return app, host, port
@@ -249,6 +264,8 @@ def _make_scryo_server(
     gene_store: GeneStore | None = None,
     default_color: str | None = None,
     dataset_id: str = "scryo",
+    markers: bytes | None = None,
+    colors: bytes | None = None,
 ) -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI()
@@ -263,9 +280,7 @@ def _make_scryo_server(
 
     @app.middleware("http")
     async def no_cache(request: Request, call_next):  # type: ignore[no-untyped-def]
-        # The bundled frontend uses fixed asset names (e.g. /assets/index.js)
-        # with no content hash, so browsers would otherwise serve a stale viewer
-        # after a rebuild. no-cache forces revalidation (cheap 304s via ETag).
+        # bundled asset names carry no content hash, so force revalidation
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
@@ -290,8 +305,7 @@ def _make_scryo_server(
 
     @app.get("/data/scryo/config")
     async def get_config() -> dict:
-        # dataset_id namespaces client-side persistence so different deployments
-        # don't share a saved color column in localStorage.
+        # dataset_id namespaces localStorage so deployments don't share a saved color
         return {"dataset_id": dataset_id, "default_color": default_color}
 
     con = duckdb.connect(":memory:")
@@ -340,9 +354,7 @@ def _make_scryo_server(
         available_assays = sorted({c.rsplit("_", 1)[1] for c in gene_columns_all if "_" in c})
     gene_columns_set = set(gene_columns_all)
     loaded_columns: set[str] = set()
-    # pyarrow ParquetFile.read() isn't documented as thread-safe; serialize
-    # the executor's load-column workers behind a lock. Single-gene reads
-    # are ~1 ms so contention is negligible.
+    # pyarrow ParquetFile.read() isn't documented as thread-safe
     parquet_reader_lock = threading.Lock()
 
     @app.get("/data/scryo/genes")
@@ -353,9 +365,16 @@ def _make_scryo_server(
             "count": len(gene_names_unique),
         }
 
+    @app.get("/data/scryo/markers")
+    async def get_markers() -> Response:
+        return Response(content=markers or b'{"clusters": []}', media_type="application/json")
+
+    @app.get("/data/scryo/colors")
+    async def get_colors() -> Response:
+        return Response(content=colors or b"{}", media_type="application/json")
+
     def _load_from_sparse(column: str) -> None:
-        # Read just this gene's non-zero (cell, value) pairs from the mmap and
-        # write only those rows into DuckDB -- O(nnz_in_gene), no dense column.
+        # only the gene's non-zero (cell, value) pairs; O(nnz), no dense column
         assert gene_store is not None
         cells, vals = gene_store.read_column(column)
         with con.cursor() as cursor:
@@ -390,6 +409,19 @@ def _make_scryo_server(
             )
             cursor.execute("DROP VIEW IF EXISTS _gene_arrow")
 
+    def _load_all(columns: list[str]) -> None:
+        for column in columns:
+            if column in loaded_columns:
+                continue
+            if gene_store is not None:
+                _load_from_sparse(column)
+            else:
+                _load_from_parquet(column)
+            loaded_columns.add(column)
+
+    async def _load_in_executor(columns: list[str]) -> None:
+        await asyncio.get_running_loop().run_in_executor(executor, _load_all, columns)
+
     @app.post("/data/scryo/load-column")
     async def load_column(req: Request) -> Response:
         body = await req.json()
@@ -398,16 +430,16 @@ def _make_scryo_server(
             return JSONResponse({"error": f"Unknown column: {column}"}, status_code=400)
         if column in loaded_columns:
             return JSONResponse({"status": "already_loaded", "column": column})
-
-        def _load() -> None:
-            if gene_store is not None:
-                _load_from_sparse(column)
-            else:
-                _load_from_parquet(column)
-            loaded_columns.add(column)
-
-        await asyncio.get_running_loop().run_in_executor(executor, _load)
+        await _load_in_executor([column])
         return JSONResponse({"status": "loaded", "column": column})
+
+    @app.post("/data/scryo/load-columns")
+    async def load_columns(req: Request) -> Response:
+        """Warm several gene columns in one request, for prefetching marker sets."""
+        body = await req.json()
+        wanted = [c for c in body.get("columns", []) if c in gene_columns_set]
+        await _load_in_executor(wanted)
+        return JSONResponse({"loaded": wanted})
 
     _cache: dict[str, object] = {}
 
