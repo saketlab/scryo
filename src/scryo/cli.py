@@ -59,6 +59,17 @@ def setup_logging() -> None:
     ),
 )
 @click.option(
+    "--default-reduction",
+    "default_reduction",
+    type=str,
+    default=None,
+    help=(
+        "Reduction to show on first open, e.g. 'umap' (matched "
+        "case-insensitively). Use when a dataset has several embeddings and "
+        "the UMAP>tSNE>PCA heuristic picks the wrong one."
+    ),
+)
+@click.option(
     "--analysis",
     "analysis_path",
     type=click.Path(exists=True, path_type=Path),
@@ -78,6 +89,7 @@ def main(
     force_extract: bool,
     out_path: Path | None,
     default_color: str | None,
+    default_reduction: str | None,
     analysis_path: Path | None,
 ) -> None:
     """scryo — Single-cell RNA-seq visualization.
@@ -144,6 +156,7 @@ def main(
         port=port,
         duckdb_mode=duckdb_mode,
         default_color=default_color,
+        default_reduction=default_reduction,
     )
 
 
@@ -154,6 +167,7 @@ def _launch_server(
     port: int,
     duckdb_mode: str,
     default_color: str | None = None,
+    default_reduction: str | None = None,
 ) -> None:
     """Launch the scryo visualization server."""
     import uvicorn
@@ -166,6 +180,7 @@ def _launch_server(
         host=host,
         port=port,
         default_color=default_color,
+        default_reduction=default_reduction,
     )
 
     click.echo()

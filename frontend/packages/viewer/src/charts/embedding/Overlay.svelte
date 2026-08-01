@@ -53,7 +53,7 @@
   });
 </script>
 
-<svg width={proxy.width} height={proxy.height}>
+<svg class="scryo-figure-overlay" width={proxy.width} height={proxy.height}>
   <g>
     {#if center != null}
       {@const l1 = proxy.location(center.x, center.y)}

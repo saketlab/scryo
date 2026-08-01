@@ -12,31 +12,23 @@
   }
 
   interface Props {
+    // markers sidecar data, fetched once by the parent (Embedding.svelte)
+    groups: Group[];
+    annotationColumn: string;
+    assay: string;
     activeColumn: string | null | undefined;
     onGeneSelect: (column: string) => void;
     onResetColor: (column: string) => void;
   }
 
-  let { activeColumn, onGeneSelect, onResetColor }: Props = $props();
+  let { groups, annotationColumn, assay, activeColumn, onGeneSelect, onResetColor }: Props = $props();
 
   const COLLAPSED = 8;
 
-  let groups: Group[] = $state([]);
-  let annotationColumn = $state("");
-  let assay = $state("RNA");
   let filter = $state("");
   let expanded: string | null = $state(null);
   let showAll = $state(false);
   let hovered: Marker | null = $state(null);
-
-  fetch("/data/scryo/markers")
-    .then((r) => r.json())
-    .then((d) => {
-      groups = d.clusters ?? [];
-      annotationColumn = d.column ?? "";
-      assay = d.assay ?? "RNA";
-    })
-    .catch(() => {});
 
   let activeGene = $derived(
     activeColumn && activeColumn.endsWith(`_${assay}`) ? activeColumn.slice(0, -(assay.length + 1)) : null,

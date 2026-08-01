@@ -14,8 +14,7 @@ export default defineConfig({
     plugins: () => [wasm()],
     rolldownOptions: {
       output: {
-        // Stable filenames so committing the prebuilt bundle to
-        // src/scryo/static/ doesn't churn the git diff every build.
+        // stable names; the prebuilt bundle is committed to src/scryo/static/
         entryFileNames: "assets/[name].js",
         chunkFileNames: "assets/[name].js",
         assetFileNames: "assets/[name].[ext]",
@@ -28,10 +27,10 @@ export default defineConfig({
     chunkSizeWarningLimit: 4096,
     rolldownOptions: {
       output: {
-        // Stable filenames so committing the prebuilt bundle to
-        // src/scryo/static/ doesn't churn the git diff every build.
-        entryFileNames: "assets/[name].js",
-        chunkFileNames: "assets/[name].js",
+        // hash only the app JS so a redeploy busts browser and CDN caches;
+        // index.html is served no-cache and references the current hash
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
         assetFileNames: "assets/[name].[ext]",
       },
     },

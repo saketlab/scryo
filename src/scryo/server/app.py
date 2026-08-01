@@ -88,6 +88,15 @@ def _mount_bytes(
         )
 
 
+# minimum fraction of cells a reduction must cover to be offered
+MIN_REDUCTION_COVERAGE = 0.5
+
+
+# hashed app JS gets a new URL every deploy, so it can be cached forever;
+# everything else keeps a stable URL and must revalidate
+_HASHED_JS = re.compile(r"/assets/[^/]+-[0-9a-zA-Z_]{6,}\.js$")
+
+
 def detect_reductions(columns: list[str]) -> dict[str, tuple[str, str]]:
     """Detect DimReduc coordinate pairs from column names."""
     reductions: dict[str, tuple[str, str]] = {}
@@ -103,12 +112,38 @@ def detect_reductions(columns: list[str]) -> dict[str, tuple[str, str]]:
 def detect_default_reduction(reductions: dict[str, tuple[str, str]]) -> str | None:
     """Pick the best default reduction. Prefer UMAP > tSNE > PCA > first available."""
     priorities = ["umap", "tsne", "pca"]
-    names_lower = {name.lower(): name for name in reductions}
     for priority in priorities:
-        for lower_name, original_name in names_lower.items():
-            if priority in lower_name:
-                return original_name
+        for name in reductions:
+            if priority in name.lower():
+                return name
     return next(iter(reductions), None)
+
+
+def resolve_default_reduction(reductions: dict[str, tuple[str, str]], requested: str | None) -> str:
+    """Resolve which reduction to show first.
+
+    An explicit request matches by exact name first, then case-insensitively
+    when unambiguous; missing or ambiguous is an error rather than a silent
+    fallback, since a dataset can carry both UMAP and umap. With no request,
+    fall back to the UMAP > tSNE > PCA heuristic.
+    """
+    if requested is not None:
+        if requested in reductions:
+            return requested
+        matches = [r for r in reductions if r.lower() == requested.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(
+                f"--default-reduction {requested!r} is ambiguous among {matches}; use exact case"
+            )
+        raise ValueError(
+            f"--default-reduction {requested!r} not found; available: {list(reductions)}"
+        )
+    default = detect_default_reduction(reductions)
+    if default is None:
+        raise ValueError("No DimReduc coordinate pairs found in parquet columns")
+    return default
 
 
 # nCount_<assay> / nFeature_<assay> share the gene suffix but are metadata
@@ -129,6 +164,7 @@ def create_scryo_server(
     host: str = "0.0.0.0",
     port: int = 8050,
     default_color: str | None = None,
+    default_reduction: str | None = None,
 ) -> tuple:
     """Create the scryo FastAPI application.
 
@@ -139,6 +175,9 @@ def create_scryo_server(
         port: Server port.
         default_color: Column to color the embedding by on first open (the user's
             later choice persists client-side and overrides this).
+        default_reduction: Reduction name to show on first open, matched
+            case-insensitively. Overrides the UMAP > tSNE > PCA heuristic,
+            which cannot tell an integrated embedding from a per-assay one.
 
     Returns:
         Tuple of (FastAPI app, host, port).
@@ -158,12 +197,7 @@ def create_scryo_server(
     if not reductions:
         raise ValueError("No DimReduc coordinate pairs found in parquet columns")
 
-    default_reduc = detect_default_reduction(reductions)
-    if default_reduc is None:
-        raise ValueError("No DimReduc coordinate pairs found in parquet columns")
-    x_col, y_col = reductions[default_reduc]
-    logger.info("Default reduction: %s (%s, %s)", default_reduc, x_col, y_col)
-    logger.info("Available reductions: %s", list(reductions.keys()))
+    # the default is picked after loading, once degenerate reductions are dropped
 
     meta_columns = [c for c in all_columns if not _is_gene_column(c)]
     gene_columns = [c for c in all_columns if _is_gene_column(c)]
@@ -188,12 +222,65 @@ def create_scryo_server(
             )
             for k, v in reductions.items()
         }
-        default_reduc = rename_map.get(default_reduc, default_reduc)
-        x_col = rename_map.get(x_col, x_col)
-        y_col = rename_map.get(y_col, y_col)
         logger.info("Renamed %d dotted columns", len(rename_map))
 
     logger.info("Loaded: %d cells x %d columns", len(df), len(df.columns))
+
+    # a real embedding covers ~all cells, so a mostly-NaN pair is a stale
+    # meta.data column that would render as a sparse, misleading plot
+    def _coverage(cols: tuple[str, str]) -> float:
+        return float(min(df[cols[0]].notna().mean(), df[cols[1]].notna().mean()))
+
+    cov = {k: _coverage(v) for k, v in reductions.items()}
+    live_reductions = {k: v for k, v in reductions.items() if cov[k] >= MIN_REDUCTION_COVERAGE}
+    dropped_reducs = [k for k in reductions if k not in live_reductions]
+    if dropped_reducs:
+        # drop the coordinate columns too, not just the reduction entry: DuckDB is
+        # case-insensitive, so a leftover UMAP_1 collides with umap_1 at table
+        # creation and the real column gets renamed to umap_1_1
+        drop_cols = {c for k in dropped_reducs for c in reductions[k]}
+        logger.warning(
+            "Dropping low-coverage reductions %s and columns %s",
+            [f"{k} ({cov[k]:.0%})" for k in dropped_reducs],
+            sorted(drop_cols),
+        )
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+        meta_columns = [c for c in meta_columns if c not in drop_cols]
+    reductions = live_reductions
+    if not reductions:
+        raise ValueError("All detected reductions are mostly NaN")
+
+    # same collision for any other column pair differing only in case; keep the
+    # better-populated one and warn rather than silently serve the shadowed column
+    by_lower: dict[str, list[str]] = {}
+    for c in df.columns:
+        by_lower.setdefault(c.lower(), []).append(c)
+    drop_dups: list[str] = []
+    for cs in by_lower.values():
+        if len(cs) < 2:
+            continue
+        keep = max(cs, key=lambda c: int(df[c].notna().sum()))
+        losers = [c for c in cs if c != keep]
+        drop_dups.extend(losers)
+        logger.warning(
+            "Case-insensitive column collision %s: DuckDB cannot distinguish these; "
+            "keeping better-populated %r, dropping %s. Rename them upstream to avoid ambiguity.",
+            cs,
+            keep,
+            losers,
+        )
+    if drop_dups:
+        df = df.drop(columns=drop_dups)
+        meta_columns = [c for c in meta_columns if c not in drop_dups]
+        # a dropped column must not leave a reduction pointing at a missing column
+        reductions = {k: v for k, v in reductions.items() if v[0] in df.columns and v[1] in df.columns}
+        if not reductions:
+            raise ValueError("All reductions lost a column to case-collision de-duplication")
+
+    default_reduc = resolve_default_reduction(reductions, default_reduction)
+    x_col, y_col = reductions[default_reduc]
+    logger.info("Default reduction: %s (%s, %s)", default_reduc, x_col, y_col)
+    logger.info("Available reductions: %s", list(reductions.keys()))
 
     df["__row_index__"] = range(len(df))
     df["__rowid"] = range(len(df))
@@ -279,10 +366,12 @@ def _make_scryo_server(
     )
 
     @app.middleware("http")
-    async def no_cache(request: Request, call_next):  # type: ignore[no-untyped-def]
-        # bundled asset names carry no content hash, so force revalidation
+    async def cache_control(request: Request, call_next):  # type: ignore[no-untyped-def]
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        if _HASHED_JS.search(request.url.path):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
     _mount_bytes(

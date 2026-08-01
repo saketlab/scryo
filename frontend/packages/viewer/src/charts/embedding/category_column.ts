@@ -87,7 +87,6 @@ export function recolorContinuousLegend(legend: EmbeddingLegend, scaleName: stri
   let { min: minVal, max: maxVal } = legend.dataRange;
   let range = maxVal - minVal;
 
-  // Rebuild legend ticks with new colors
   let tickCount = 5;
   let newLegend: EmbeddingLegend["legend"] = [];
   for (let t = 0; t < tickCount; t++) {
@@ -101,7 +100,6 @@ export function recolorContinuousLegend(legend: EmbeddingLegend, scaleName: stri
     });
   }
 
-  // Preserve null entry if present
   let nullEntry = legend.legend.find((x) => x.label.includes("null"));
   if (nullEntry) {
     newLegend.push(nullEntry);
@@ -118,7 +116,7 @@ export function recolorContinuousLegend(legend: EmbeddingLegend, scaleName: stri
   };
 }
 
-/** Generate `numBins` colors from a named scale. */
+/** Generate numBins colors from a named scale. */
 export function generatePalette(scaleName: string, numBins: number = 64): string[] {
   let interpolator = scaleInterpolators[scaleName] ?? d3.interpolateViridis;
   let colors: string[] = [];
@@ -387,16 +385,16 @@ async function makeBinnedNumericColumn(
 /**
  * Linear quantization for continuous numeric columns.
  *
- * 64 bins because the shader's colorScheme uniform holds 64 and the category
- * attribute is a signed byte. The null bin sits at 64, past the palette, so it
- * hits the shader's grey fallback.
+ * 64 bins: the shader's colorScheme uniform holds 64 and the category attribute
+ * is a signed byte. The null bin at 64 falls past the palette onto the grey fallback.
  */
 async function makeContinuousColumn(
   coordinator: Coordinator,
   table: string,
   column: string,
   theme: ChartTheme,
-  scaleName: string = "viridis",
+  // purples keeps low/zero cells receding; reads better for genes than viridis
+  scaleName: string = "purples",
 ): Promise<EmbeddingLegend> {
   const NUM_BINS = 64;
   let indexColumnName = `__ev_${column}_id`;
@@ -413,7 +411,6 @@ async function makeContinuousColumn(
   let minVal = result[0]?.min_val ?? 0;
   let maxVal = result[0]?.max_val ?? 1;
 
-  // Avoid division by zero
   if (maxVal === minVal) {
     maxVal = minVal + 1;
   }

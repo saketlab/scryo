@@ -38,22 +38,47 @@
   import Slider from "../../widgets/Slider.svelte";
   import Legend from "./Legend.svelte";
 
-  import { IconSettings } from "../../assets/icons.js";
+  import { IconSettings, IconDownload } from "../../assets/icons.js";
+  import { composeEmbeddingFigure, type LegendSpec } from "./figure_export.js";
   import { isolatedWritable } from "../../utils/store.js";
   import type { ChartViewProps, RowID } from "../chart.js";
   import { resolveChartTheme } from "../common/theme.js";
-  import {
-    makeCategoryColumn,
-    CONTINUOUS_SCALES,
-    recolorContinuousLegend,
-    generatePalette,
-  } from "./category_column.js";
+  import { makeCategoryColumn, CONTINUOUS_SCALES, recolorContinuousLegend } from "./category_column.js";
   import GeneSearch from "./GeneSearch.svelte";
   import MarkerPanel from "./MarkerPanel.svelte";
+  import ViolinPanel from "./ViolinPanel.svelte";
+  import SplitEmbedding from "./SplitEmbedding.svelte";
   import type { EmbeddingSpec, EmbeddingState } from "./types.js";
   import { interpolateViewport } from "./viewport_animation.js";
 
-  let selectedColorScale = $state("viridis");
+  let selectedColorScale = $state("purples");
+
+  // ?reduction=umap&color=ALB_RNA style overrides; these win over the saved/default view
+  const shareParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
+
+  let figureRoot = $state<HTMLDivElement | null>(null);
+
+  function exportEmbedding(format: "png" | "svg") {
+    if (figureRoot == null) return;
+    let split = splitColumn != null && splitValues != null && splitValues.length > 1;
+    let name = split ? `umap-split-${splitColumn}` : currentReduction || "umap";
+    let cl = categoryLegend;
+    let title = categoryColumn ?? "";
+    let legend: LegendSpec | null =
+      cl == null
+        ? null
+        : cl.isContinuous
+          ? {
+              title,
+              gradient: {
+                colors: (cl.categoryColors ?? []).slice(0, 64),
+                min: cl.legend[0]?.label ?? "",
+                max: cl.legend[cl.legend.length - 1]?.label ?? "",
+              },
+            }
+          : { title, items: cl.legend.map((l) => ({ label: String(l.label), color: l.color })) };
+    composeEmbeddingFigure(figureRoot, format, name, legend);
+  }
 
   interface ReductionInfo {
     x: string;
@@ -66,7 +91,26 @@
     .then((r) => r.json())
     .then((data) => {
       availableReductions = data.reductions ?? {};
-      currentReduction = data.default ?? "";
+      let wantReduc = shareParams.get("reduction");
+      let reducKey = wantReduc
+        ? Object.keys(availableReductions).find((k) => k.toLowerCase() === wantReduc.toLowerCase())
+        : undefined;
+      if (reducKey) {
+        switchReduction(reducKey);
+        return;
+      }
+      // a restored view can pin x/y to a reduction the server dropped as
+      // degenerate; snap back to the default rather than plot a sparse one
+      let match = Object.entries(availableReductions).find(
+        ([, r]) => r.x === spec.data.x && r.y === spec.data.y,
+      );
+      if (match) {
+        currentReduction = match[0];
+      } else if (data.default && availableReductions[data.default]) {
+        switchReduction(data.default);
+      } else {
+        currentReduction = data.default ?? "";
+      }
     })
     .catch(() => {});
 
@@ -102,6 +146,12 @@
       if (colorInitialized) return;
       colorInitialized = true;
 
+      let shared = shareParams.get("color");
+      if (shared != null && shared !== "") {
+        applyColor(shared);
+        return;
+      }
+
       // a saved "" means deliberately cleared, so it still wins over the default
       let raw: string | null = null;
       try {
@@ -121,10 +171,89 @@
 
   let genePanelTab = $state("genes");
 
+  // markers sidecar, fetched once here and passed down to MarkerPanel
+  let annotationColumn = $state("");
+  let assay = $state("RNA");
+  let markerClusters = $state<any[]>([]);
+  let splitColumn = $state<string | null>(null);
+
+  // one small-multiple per value of splitColumn; capped so a high-cardinality
+  // column (sample id, etc.) can't spawn 100 panels
+  const MAX_SPLIT = 8;
+  let splitValues = $state<string[] | null>(null);
+  let splitTruncated = $state(false);
+
+  $effect(() => {
+    let col = splitColumn;
+    // clear now so the stale top-N can't drive the split while the new query runs
+    splitValues = null;
+    splitTruncated = false;
+    if (col == null) return;
+    let cancelled = false;
+    // order + cap in SQL so a high-cardinality column doesn't ship 950k rows to the client
+    context.coordinator
+      .query(
+        SQL.Query.from(context.table)
+          .select({ v: SQL.column(col) })
+          .where(SQL.sql`${SQL.column(col)} IS NOT NULL`)
+          .groupby(SQL.column(col))
+          .orderby(SQL.sql`COUNT(*) DESC`)
+          .limit(MAX_SPLIT + 1),
+      )
+      .then((res: any) => {
+        if (cancelled) return;
+        let rows = Array.from(res) as any[];
+        splitTruncated = rows.length > MAX_SPLIT;
+        splitValues = rows.slice(0, MAX_SPLIT).map((r) => String(r.v));
+      })
+      .catch(() => {
+        if (!cancelled) splitValues = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  fetch("/data/scryo/markers")
+    .then((r) => r.json())
+    .then((d) => {
+      annotationColumn = d.column ?? "";
+      assay = d.assay ?? "RNA";
+      markerClusters = d.clusters ?? [];
+    })
+    .catch(() => {});
+
   function handleGeneSelect(column: string) {
     // setting the colour column is what triggers makeCategoryColumn
     onSpecChange({ data: { ...spec.data, category: column } });
   }
+
+  // a gene column isn't in context.columns; warm it server-side first so a
+  // shared ?color=GENE url renders on a cold column
+  async function applyColor(col: string): Promise<void> {
+    if (!context.columns.some((c) => c.name === col)) {
+      try {
+        await fetch("/data/scryo/load-columns", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ columns: [col] }),
+        });
+      } catch {
+        /* colouring will just fall back if the load fails */
+      }
+    }
+    onSpecChange({ data: { ...spec.data, category: col } });
+  }
+
+  // mirrors the server's _is_gene_column; testing against context.columns instead
+  // would misfire, since a gene loaded by any prior viewer stays in the shared table
+  const GENE_SUFFIXES = ["_RNA", "_SCT"];
+  const NON_GENE_COLUMNS = new Set(["nCount_RNA", "nFeature_RNA", "nCount_SCT", "nFeature_SCT"]);
+  let violinGene = $derived.by(() => {
+    let c = spec.data.category;
+    if (c == null || NON_GENE_COLUMNS.has(c)) return null;
+    return GENE_SUFFIXES.some((s) => c.endsWith(s)) ? c : null;
+  });
 
   const maxCategories = Math.min(20, maxDensityModeCategories());
   const defaultMinimumDensity = 1 / 16;
@@ -153,6 +282,20 @@
 
   let categoryLegend: EmbeddingLegend | null = $state.raw(null);
   let totalPointCount: number | null = $state.raw(null);
+
+  let resolvedCategoryColors = $derived.by(
+    () => categoryLegend?.categoryColors ?? categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor],
+  );
+
+  // one config identity for both views, so a parent re-render doesn't churn every panel
+  let panelConfig = $derived({
+    colorScheme: $colorScheme,
+    ...context.embeddingViewConfig,
+    mode: spec.mode ?? "points",
+    ...(spec.minimumDensity != null ? { minimumDensity: spec.minimumDensity } : {}),
+    ...(spec.pointSize != null ? { pointSize: spec.pointSize } : {}),
+    downsampleMaxPoints: spec.downsampleMaxPoints ?? defaultDownsampleMaxPoints,
+  });
 
   // Query total point count for render limit slider
   $effect.pre(() => {
@@ -333,6 +476,24 @@
 </script>
 
 <div class="relative">
+  <div bind:this={figureRoot}>
+  {#if splitColumn != null && splitValues != null && splitValues.length > 1}
+    <SplitEmbedding
+      coordinator={context.coordinator}
+      table={context.table}
+      x={spec.data.x}
+      y={spec.data.y}
+      identifier={context.id}
+      rowKey={context.id}
+      category={categoryLegend?.indexColumn}
+      categoryColors={resolvedCategoryColors}
+      splitColumn={splitColumn}
+      values={splitValues}
+      config={panelConfig}
+      width={width}
+      height={height}
+    />
+  {:else}
   <EmbeddingViewMosaic
     width={width}
     height={height}
@@ -346,16 +507,8 @@
     text={spec.data.text}
     category={categoryLegend?.indexColumn}
     rowKey={context.id}
-    categoryColors={categoryLegend?.categoryColors ??
-      categoryLegend?.legend.map((x) => x.color) ?? [theme.embeddingColor]}
-    config={{
-      colorScheme: $colorScheme,
-      ...context.embeddingViewConfig,
-      mode: spec.mode ?? "points",
-      ...(spec.minimumDensity != null ? { minimumDensity: spec.minimumDensity } : {}),
-      ...(spec.pointSize != null ? { pointSize: spec.pointSize } : {}),
-      downsampleMaxPoints: spec.downsampleMaxPoints ?? defaultDownsampleMaxPoints,
-    }}
+    categoryColors={resolvedCategoryColors}
+    config={panelConfig}
     labels={context.embeddingViewLabels}
     cache={context.persistentCache}
     additionalFields={Object.fromEntries(context.columns.map((c) => [c.name, c.name]))}
@@ -389,6 +542,8 @@
       highlightStore.set(points?.map((p) => p.identifier) ?? null);
     }}
   />
+  {/if}
+  </div>
   <div class="absolute top-0 left-0 right-0 flex flex-wrap justify-between items-start pointer-events-none">
     {#if categoryLegend != null}
       <div
@@ -469,6 +624,39 @@
             .map((c) => ({ value: c.name, label: c.name })),
         ]}
       />
+      <Select
+        class="max-w-40"
+        label="Split by"
+        value={splitColumn ?? ""}
+        onChange={(v) => (splitColumn = v === "" ? null : v)}
+        options={[
+          { value: "", label: "--" },
+          ...context.columns
+            .filter((c) => c.jsType == "string")
+            .map((c) => ({ value: c.name, label: c.name })),
+        ]}
+      />
+      {#if splitTruncated}
+        <span class="text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap"
+          >showing top {MAX_SPLIT}</span
+        >
+      {/if}
+      <PopupButton icon={IconDownload} title="Download figure">
+        <div class="flex flex-col gap-1 w-32">
+          <button
+            class="px-2 py-1 text-xs rounded text-left hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200"
+            onclick={() => exportEmbedding("png")}
+          >
+            Download PNG
+          </button>
+          <button
+            class="px-2 py-1 text-xs rounded text-left hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200"
+            onclick={() => exportEmbedding("svg")}
+          >
+            Download SVG
+          </button>
+        </div>
+      </PopupButton>
       <PopupButton icon={IconSettings} title="Options">
         <div class="flex flex-col gap-2 w-64">
           <label class="flex items-center gap-2 cursor-pointer select-none">
@@ -568,6 +756,9 @@
       </div>
       {#if genePanelTab === "markers"}
         <MarkerPanel
+          groups={markerClusters}
+          annotationColumn={annotationColumn}
+          assay={assay}
           activeColumn={categoryColumn}
           onGeneSelect={handleGeneSelect}
           onResetColor={(column) => setColor(column)}
@@ -575,4 +766,18 @@
       {/if}
     </div>
   </div>
+  {#if violinGene != null && annotationColumn != ""}
+    <div class="absolute bottom-2 left-2 right-2 z-10 pointer-events-auto" style="max-height: 42%;">
+      <ViolinPanel
+        coordinator={context.coordinator}
+        table={context.table}
+        gene={violinGene}
+        annotationColumn={annotationColumn}
+        splitColumn={splitColumn}
+        splitValues={splitValues}
+        colorScheme={$colorScheme}
+        assay={assay}
+      />
+    </div>
+  {/if}
 </div>
